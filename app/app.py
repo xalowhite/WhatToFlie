@@ -678,51 +678,78 @@ elk hair,LOW,Nature's Spirit,
             st.warning(f"Could not load bundled inventory: {e}")
 
     # ---- 4) Matching Options
-    st.header("4) Matching Options")
-    use_subs = st.checkbox("Use substitutions", value=True)
-    ignore_labels = st.checkbox("Ignore part labels (looser matching)", value=True)
-    ignore_color = st.checkbox("Ignore color variations (match by color family)", value=True)
+# ---- 4) Matching Options
+st.header("4) Matching Options")
 
-    st.markdown("---")
-    st.header("Hooks Matching")
-    size_tol = st.slider("Hook size tolerance (higher = looser)", 0, 8, 2)
-    require_len = st.checkbox("Require length tag match (e.g., 3xl)", value=False)
+use_subs = st.checkbox("Use substitutions",
+    value=st.session_state.get("pref_use_subs", True), key="pref_use_subs")
+ignore_labels = st.checkbox("Ignore part labels (looser matching)",
+    value=st.session_state.get("pref_ignore_labels", True), key="pref_ignore_labels")
+ignore_color = st.checkbox("Ignore color variations (match by color family)",
+    value=st.session_state.get("pref_ignore_color", True), key="pref_ignore_color")
 
-    st.header("Brand & Model Preferences")
-    brand_aliases_file = st.file_uploader("Upload brands_aliases.csv (alias,brand)", type=["csv"], key="brand_aliases_csv")
+st.markdown("---")
+st.header("Hooks Matching")
+size_tol = st.slider("Hook size tolerance (higher = looser)", 0, 8,
+    st.session_state.get("pref_size_tol", 2), key="pref_size_tol")
+require_len = st.checkbox("Require length tag match (e.g., 3xl)",
+    value=st.session_state.get("pref_require_len", False), key="pref_require_len")
 
-    def _load_brand_aliases_default():
-        m = load_brand_aliases("data/brands_aliases.csv")
-        if not m:
-            m = load_brand_aliases("data/brand_aliases.csv")
-        return m
+st.header("Brand & Model Preferences")
 
-    brand_aliases = load_brand_aliases(brand_aliases_file) if brand_aliases_file is not None else _load_brand_aliases_default()
+brand_aliases_file = st.file_uploader(
+    "Upload brands_aliases.csv (alias,brand)", type=["csv"], key="brand_aliases_csv"
+)
 
-    hooks_catalog_file = st.file_uploader("Upload hooks_catalog.csv (brand,model,family,length_tag,wire,eye,barbless,notes)", type=["csv"], key="hooks_catalog_csv")
-    if hooks_catalog_file is not None:
-        hooks_catalog = load_hooks_catalog(hooks_catalog_file)
-    else:
-        hooks_catalog = load_hooks_catalog("data/hooks_catalog.csv")
+def _load_brand_aliases_default():
+    m = load_brand_aliases("data/brands_aliases.csv")
+    if not m:
+        m = load_brand_aliases("data/brand_aliases.csv")
+    return m
 
-    brand_prefs_file = st.file_uploader("Upload brand_prefs.csv (category,preferred_brands)", type=["csv"], key="brand_prefs_csv")
-    if brand_prefs_file is not None:
-        brand_prefs = load_brand_prefs(brand_prefs_file)
-    else:
-        brand_prefs = load_brand_prefs("data/brand_prefs.csv")
+brand_aliases = (
+    load_brand_aliases(brand_aliases_file)
+    if brand_aliases_file is not None
+    else _load_brand_aliases_default()
+)
 
-    prefer_brands = st.checkbox("Prefer my brands/models in recommendations", value=True)
+hooks_catalog_file = st.file_uploader(
+    "Upload hooks_catalog.csv (brand,model,family,length_tag,wire,eye,barbless,notes)",
+    type=["csv"], key="hooks_catalog_csv"
+)
+hooks_catalog = (
+    load_hooks_catalog(hooks_catalog_file)
+    if hooks_catalog_file is not None
+    else load_hooks_catalog("data/hooks_catalog.csv")
+)
 
-    # If user uploaded brand aliases, refresh the in-app auto-detection map immediately
-    if brand_aliases_file is not None:
-        KNOWN_BRANDS_ALIASES.clear()
-        KNOWN_BRANDS_ALIASES.update({normalize(k): v for k, v in brand_aliases.items()})
-        # Add passthrough from hooks catalog + some common lines
-        passthrough = set([normalize(b) for b in (hooks_catalog["brand"].dropna().unique().tolist() if not hooks_catalog.empty else [])])
-        passthrough.update(["wapsi", "hareline", "uni", "veevus", "utc", "semperfli"])
-        for b in passthrough:
-            if b and b not in KNOWN_BRANDS_ALIASES:
-                KNOWN_BRANDS_ALIASES[b] = b.title()
+brand_prefs_file = st.file_uploader(
+    "Upload brand_prefs.csv (category,preferred_brands)", type=["csv"], key="brand_prefs_csv"
+)
+brand_prefs = (
+    load_brand_prefs(brand_prefs_file)
+    if brand_prefs_file is not None
+    else load_brand_prefs("data/brand_prefs.csv")
+)
+
+prefer_brands = st.checkbox(
+    "Prefer my brands/models in recommendations",
+    value=st.session_state.get("pref_prefer_brands", True),
+    key="pref_prefer_brands"
+)
+
+# If user uploaded brand aliases, refresh the in-app auto-detection map immediately
+if brand_aliases_file is not None:
+    KNOWN_BRANDS_ALIASES.clear()
+    KNOWN_BRANDS_ALIASES.update({normalize(k): v for k, v in brand_aliases.items()})
+    passthrough = set([normalize(b) for b in (
+        hooks_catalog["brand"].dropna().unique().tolist() if not hooks_catalog.empty else []
+    )])
+    passthrough.update(["wapsi", "hareline", "uni", "veevus", "utc", "semperfli"])
+    for b in passthrough:
+        if b and b not in KNOWN_BRANDS_ALIASES:
+            KNOWN_BRANDS_ALIASES[b] = b.title()
+
 
     # ---- Status panel
     st.markdown("---")
@@ -827,12 +854,82 @@ with st.expander("🆕 Create a new recipe from a tutorial"):
         flies_df.loc[len(flies_df)] = row
         st.success(f"Added new recipe '{nr_name}'. It will be included immediately in matching. Use the download button below to save updated flies.csv.")
 
+# --- Account ID handling with URL query params for cross-device convenience
+if "account_id" not in st.session_state:
+    st.session_state["account_id"] = ""
+
+# Pick up ?acct=<id> from the URL on first load
+qp = st.query_params
+if "acct" in qp and not st.session_state.get("account_id"):
+    acct_from_url = qp.get("acct")
+    if isinstance(acct_from_url, list):
+        acct_from_url = acct_from_url[0] if acct_from_url else ""
+    st.session_state["account_id"] = acct_from_url or ""
+
+def set_account_id():
+    acct = st.session_state.get("account_id", "").strip()
+    if acct:
+        st.query_params["acct"] = acct
+    else:
+        if "acct" in st.query_params:
+            del st.query_params["acct"]
+
 st.markdown("### ☁️ Cloud sync (temporary)")
 acct_id = st.text_input(
     "Account ID (temporary: enter your email or handle to save/load to the cloud)",
     key="account_id",
+    placeholder="you@example.com",
+    on_change=set_account_id,   # <-- no args needed
+)
+
+
+st.markdown("### ☁️ Cloud preferences")
+acct_id_prefs = st.text_input(
+    "Account ID for preferences (use the same as Cloud sync above)",
+    key="account_id_prefs",
+    value=st.session_state.get("account_id", ""),
     placeholder="you@example.com"
 )
+
+cP1, cP2 = st.columns(2)
+with cP1:
+    if st.button("Save Preferences to Cloud"):
+        prefs = {
+            "pref_use_subs": bool(st.session_state.get("pref_use_subs", True)),
+            "pref_ignore_labels": bool(st.session_state.get("pref_ignore_labels", True)),
+            "pref_ignore_color": bool(st.session_state.get("pref_ignore_color", True)),
+            "pref_size_tol": int(st.session_state.get("pref_size_tol", 2)),
+            "pref_require_len": bool(st.session_state.get("pref_require_len", False)),
+            "pref_prefer_brands": bool(st.session_state.get("pref_prefer_brands", True)),
+            # persist user-tunable maps too
+            "aliases_map": locals().get("aliases_map", {}),
+            "subs_map": {k: sorted(list(v)) for k, v in (locals().get("subs_map", {}) or {}).items()},
+            "brand_prefs": locals().get("brand_prefs", {}),
+        }
+        if save_user_prefs(acct_id_prefs, prefs):
+            st.success("Preferences saved to cloud.")
+with cP2:
+    if st.button("Load Preferences from Cloud"):
+        prefs = load_user_prefs(acct_id_prefs)
+        if not prefs:
+            st.warning("No preferences found for this account.")
+        else:
+            # apply widget-backed prefs
+            for k in ["pref_use_subs","pref_ignore_labels","pref_ignore_color",
+                      "pref_size_tol","pref_require_len","pref_prefer_brands"]:
+                if k in prefs:
+                    st.session_state[k] = prefs[k]
+            # merge in maps if present
+            if "aliases_map" in prefs and isinstance(prefs["aliases_map"], dict):
+                aliases_map.update({str(k): str(v) for k, v in prefs["aliases_map"].items()})
+            if "subs_map" in prefs and isinstance(prefs["subs_map"], dict):
+                subs_map.clear()
+                for b, eqs in prefs["subs_map"].items():
+                    subs_map[str(b)] = set(str(e) for e in (eqs or []))
+            if "brand_prefs" in prefs and isinstance(prefs["brand_prefs"], dict):
+                brand_prefs.update(prefs["brand_prefs"])
+            st.success("Preferences loaded from cloud.")
+            st.rerun()
 
 cA, cB = st.columns(2)
 with cA:
@@ -858,6 +955,58 @@ with cB:
 
 if DB is None:
     st.info("Cloud database not configured. Add Firebase service account to Streamlit **Secrets** to enable cloud sync.")
+
+def save_user_prefs(user_id: str, prefs: dict) -> bool:
+    if DB is None or not isinstance(user_id, str) or not user_id.strip():
+        return False
+    try:
+        DB.collection("users").document(user_id.strip()).collection("app").document("preferences").set(prefs, merge=True)
+        return True
+    except Exception as e:
+        st.error(f"Failed to save preferences: {e}")
+        return False
+
+def load_user_prefs(user_id: str) -> dict | None:
+    if DB is None or not isinstance(user_id, str) or not user_id.strip():
+        return None
+    try:
+        doc = DB.collection("users").document(user_id.strip()).collection("app").document("preferences").get()
+        return doc.to_dict() if doc.exists else None
+    except Exception as e:
+        st.error(f"Failed to load preferences: {e}")
+        return None
+
+# Auto-load once if we have an account id and haven't auto-loaded yet
+if DB is not None and st.session_state.get("account_id") and not st.session_state.get("did_auto_load"):
+    # Inventory
+    df_cloud = load_user_inventory(st.session_state["account_id"])
+    if isinstance(df_cloud, pd.DataFrame) and not df_cloud.empty:
+        expected = ["material", "status", "brand", "model"]
+        for col in expected:
+            if col not in df_cloud.columns:
+                df_cloud[col] = ""
+        st.session_state.inventory_df = df_cloud[expected].fillna("").drop_duplicates().reset_index(drop=True)
+
+    # Preferences
+    prefs = load_user_prefs(st.session_state["account_id"])
+    if prefs:
+        for k in ["pref_use_subs","pref_ignore_labels","pref_ignore_color",
+                  "pref_size_tol","pref_require_len","pref_prefer_brands"]:
+            if k in prefs:
+                st.session_state[k] = prefs[k]
+        # maps
+        if "aliases_map" in prefs and isinstance(prefs["aliases_map"], dict):
+            aliases_map.update({str(k): str(v) for k, v in prefs["aliases_map"].items()})
+        if "subs_map" in prefs and isinstance(prefs["subs_map"], dict):
+            subs_map.clear()
+            for b, eqs in prefs["subs_map"].items():
+                subs_map[str(b)] = set(str(e) for e in (eqs or []))
+        if "brand_prefs" in prefs and isinstance(prefs["brand_prefs"], dict):
+            brand_prefs.update(prefs["brand_prefs"])
+
+    st.session_state["did_auto_load"] = True
+    st.rerun()
+
 
 # Allow downloading the current flies
 if "flies_df" in locals():
