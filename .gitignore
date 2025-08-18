@@ -1,0 +1,22 @@
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+
+# Streamlit (DO NOT COMMIT LOCAL SECRETS)
+.streamlit/secrets.toml
+
+# Logs / artifacts
+*.log

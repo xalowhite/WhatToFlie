@@ -1,0 +1,12 @@
+category,preferred_brands
+hook,Tiemco;Ahrex;Umpqua;Daiichi;Gamakatsu;Fulling Mill;Owner;Mustad;Hanak;Dohiku;Firehole;Kona
+trout_dry,Tiemco;Fulling Mill;Ahrex;Daiichi;Firehole
+trout_nymph,Tiemco;Umpqua;Fulling Mill;Hanak;Dohiku;Daiichi
+euro_nymph,Hanak;Dohiku;Umpqua;Fulling Mill;Firehole;Tiemco
+trout_streamer,Ahrex;Gamakatsu;Tiemco;Daiichi;Umpqua;Kona
+stillwater,Fulling Mill;Tiemco;Daiichi;Ahrex
+bass,Gamakatsu;Ahrex;Kona;Tiemco
+carp,Fulling Mill;Ahrex;Gamakatsu;Tiemco;Kona
+pike_muskie,Ahrex;Gamakatsu;Owner;Kona
+steelhead_salmon,Owner;Ahrex;Gamakatsu;Tiemco;Daiichi
+saltwater,Owner;Ahrex;Gamakatsu;Tiemco;Kona

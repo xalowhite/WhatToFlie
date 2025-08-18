@@ -1,0 +1,3 @@
+material,status,brand,model
+#Example: hook: dry #14,NEW,Tiemco,TMC 100
+#Statuses can be: NEW, HALF, LOW, OUT
