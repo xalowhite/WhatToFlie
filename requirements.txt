@@ -1,4 +1,3 @@
-streamlit>=1.36
-pandas>=2.2
-firebase-admin>=6.5.0
-google-cloud-firestore>=2.16.0
+streamlit==1.48.1
+pandas
+firebase-admin
