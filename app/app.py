@@ -6,6 +6,30 @@ import itertools
 import io
 import zipfile
 
+try:
+    import firebase_admin
+    from firebase_admin import credentials, firestore
+    _FIREBASE_AVAILABLE = True
+except Exception:
+    _FIREBASE_AVAILABLE = False
+
+def init_firestore():
+    if not _FIREBASE_AVAILABLE:
+        return None
+    try:
+        if "gcp_service_account" not in st.secrets:
+            return None
+        if not firebase_admin._apps:
+            cred = credentials.Certificate(dict(st.secrets["gcp_service_account"]))
+            firebase_admin.initialize_app(cred)
+        return firestore.client()
+    except Exception as e:
+        st.warning(f"Firestore not initialized: {e}")
+        return None
+
+DB = init_firestore()
+
+
 st.set_page_config(page_title="🪶 Fly Tying Recommender", page_icon="🪶", layout="wide")
 
 # ====== Session State Initialization (for the in-app inventory editor) ======
@@ -439,6 +463,31 @@ def download_templates_ui():
         with open("data/templates/aliases_template.csv","rb") as f:
             st.download_button("aliases_template.csv", f.read(), file_name="aliases_template.csv", mime="text/csv", help="Aliases template for normalizing inputs")
 
+def save_user_inventory(user_id: str, inv_df: pd.DataFrame) -> bool:
+    if DB is None or not isinstance(user_id, str) or not user_id.strip():
+        return False
+    try:
+        doc_ref = DB.collection("users").document(user_id.strip()).collection("app").document("inventory")
+        doc_ref.set({"rows": inv_df.to_dict(orient="records")}, merge=True)
+        return True
+    except Exception as e:
+        st.error(f"Failed to save inventory: {e}")
+        return False
+
+def load_user_inventory(user_id: str) -> pd.DataFrame | None:
+    if DB is None or not isinstance(user_id, str) or not user_id.strip():
+        return None
+    try:
+        doc = DB.collection("users").document(user_id.strip()).collection("app").document("inventory").get()
+        if doc.exists:
+            rows = doc.to_dict().get("rows", [])
+            return pd.DataFrame(rows)
+        return None
+    except Exception as e:
+        st.error(f"Failed to load inventory: {e}")
+        return None
+
+
 # ====== NEW: Brand alias map used by the inventory editor to auto-extract brands ======
 @st.cache_data
 def build_known_brands_aliases() -> dict[str, str]:
@@ -777,6 +826,38 @@ with st.expander("🆕 Create a new recipe from a tutorial"):
         flies_df = locals()["flies_df"]
         flies_df.loc[len(flies_df)] = row
         st.success(f"Added new recipe '{nr_name}'. It will be included immediately in matching. Use the download button below to save updated flies.csv.")
+
+st.markdown("### ☁️ Cloud sync (temporary)")
+acct_id = st.text_input(
+    "Account ID (temporary: enter your email or handle to save/load to the cloud)",
+    key="account_id",
+    placeholder="you@example.com"
+)
+
+cA, cB = st.columns(2)
+with cA:
+    if st.button("Save to Cloud (inventory editor)"):
+        if st.session_state.inventory_df.empty:
+            st.warning("Inventory editor is empty. Add rows first.")
+        elif save_user_inventory(acct_id, st.session_state.inventory_df):
+            st.success("Saved your inventory to the cloud.")
+with cB:
+    if st.button("Load from Cloud (replace editor)"):
+        df_cloud = load_user_inventory(acct_id)
+        if df_cloud is None:
+            st.warning("No cloud inventory found for this account.")
+        else:
+            expected = ["material", "status", "brand", "model"]
+            for col in expected:
+                if col not in df_cloud.columns:
+                    df_cloud[col] = ""
+            df_cloud = df_cloud[expected].fillna("")
+            st.session_state.inventory_df = df_cloud.drop_duplicates().reset_index(drop=True)
+            st.success("Loaded inventory from the cloud.")
+            st.rerun()
+
+if DB is None:
+    st.info("Cloud database not configured. Add Firebase service account to Streamlit **Secrets** to enable cloud sync.")
 
 # Allow downloading the current flies
 if "flies_df" in locals():
