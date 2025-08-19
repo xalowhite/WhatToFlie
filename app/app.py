@@ -1152,12 +1152,6 @@ def set_account_id():
         if "acct" in st.query_params:
             del st.query_params["acct"]
 
-acct_id = st.text_input(
-    "Account ID (temporary: enter your email or handle to save/load to the cloud)",
-    key="account_id",
-    placeholder="you@example.com",
-    on_change=set_account_id,
-)
 
 st.markdown("### ☁️ Cloud preferences")
 acct_id_prefs = st.text_input(
@@ -1167,11 +1161,12 @@ acct_id_prefs = st.text_input(
     placeholder="you@example.com",
 )
 
-def save_user_inventory(user_id: str, inv_df: pd.DataFrame) -> bool:
-    if DB is None:
+def save_user_inventory(inv_df: pd.DataFrame) -> bool:
+    if DB is None or not st.session_state.get("firebase_uid"):
+        st.error("You must be logged in to save.")
         return False
     try:
-        doc_id = _effective_user_doc_id(user_id)
+        doc_id = st.session_state.firebase_uid
         DB.collection("users").document(doc_id).collection("app").document("inventory").set(
             {"rows": inv_df.to_dict(orient="records")}, merge=True
         )
@@ -1180,13 +1175,13 @@ def save_user_inventory(user_id: str, inv_df: pd.DataFrame) -> bool:
         st.error(f"Failed to save inventory: {e}")
         return False
 
-def load_user_inventory(user_id: str) -> pd.DataFrame | None:
-    if DB is None:
+def load_user_inventory() -> pd.DataFrame | None:
+    if DB is None or not st.session_state.get("firebase_uid"):
         return None
     try:
-        doc_id = _effective_user_doc_id(user_id)
+        doc_id = st.session_state.firebase_uid
         doc = DB.collection("users").document(doc_id).collection("app").document("inventory").get()
-        return pd.DataFrame(doc.to_dict().get("rows", [])) if doc.exists else None
+        return pd.DataFrame(doc.to_dict().get("rows",)) if doc.exists else None
     except Exception as e:
         st.error(f"Failed to load inventory: {e}")
         return None
