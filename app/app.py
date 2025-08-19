@@ -86,36 +86,55 @@ FIREBASE_WEB_CONFIG = dict(st.secrets.get("firebase_web", {})) or {
 # =============================
 def render_google_login_popup():
     """Open login in popup to avoid redirects"""
-    
     login_url = "https://whattoflie.web.app/login.html"
-    
+
     components.html(
         f"""
         <script>
-        function openLoginPopup() {{
+        (function() {{
+          function openLoginPopup() {{
+            const base = window.top.location.origin + window.top.location.pathname;
+            const parentOrigin = window.top.location.origin;
+
+            const url = new URL('{login_url}');
+            url.searchParams.set('popup', 'true');
+            url.searchParams.set('return_to', base);
+            url.searchParams.set('parent_origin', parentOrigin);
+
+            // IMPORTANT: keep opener (noopener=no, noreferrer=no)
             const popup = window.open(
-                '{login_url}?popup=true',
-                'GoogleLogin',
-                'width=500,height=600'
+              url.toString(),
+              'GoogleLogin',
+              'width=500,height=600,noopener=no,noreferrer=no'
             );
-            
+
             // Listen for messages from popup
             window.addEventListener('message', function(e) {{
-                if (e.origin !== 'https://whattoflie.web.app') return;
-                
-                if (e.data.type === 'auth_success') {{
-                    popup.close();
-                    // Reload with token in URL
-                    window.location.href = window.location.origin + 
-                        window.location.pathname + 
-                        '?token=' + e.data.token + 
-                        '&uid=' + e.data.uid + 
-                        '&email=' + e.data.email;
-                }}
+              // Accept your Firebase Hosting origins (add more if needed)
+              const allowed = new Set([
+                'https://whattoflie.web.app',
+                'https://whattoflie.firebaseapp.com'
+              ]);
+              if (!allowed.has(e.origin)) return;
+
+              if (e.data && e.data.type === 'auth_success') {{
+                try {{ popup && popup.close(); }} catch (_e) {{}}
+
+                // Navigate the TOP window (not just this iframe)
+                const target = new URL(base);
+                target.searchParams.set('token', e.data.token);
+                target.searchParams.set('uid', e.data.uid);
+                target.searchParams.set('email', e.data.email);
+                window.top.location.href = target.toString();
+              }}
             }});
-        }}
+          }}
+
+          // expose for button onclick
+          window.openLoginPopup = openLoginPopup;
+        }})();
         </script>
-        
+
         <button onclick="openLoginPopup()" style="
             padding: 12px 24px;
             background: #4285f4;
@@ -130,6 +149,7 @@ def render_google_login_popup():
         """,
         height=60
     )
+
 
 # =============================
 # Authentication Processing (FIXED - No Redirect Loop)
