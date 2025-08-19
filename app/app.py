@@ -9,14 +9,104 @@ import hashlib, hmac
 import json
 from urllib.error import URLError
 import requests
+import streamlit.components.v1 as components
 
 # =============================
 # App meta
 # =============================
 st.set_page_config(page_title="🪶 Fly Tying Recommender", page_icon="🪶", layout="wide")
 
-APP_BUILD = "tabs-fix-v2"
+APP_BUILD = "auth-inline-v1"
 st.caption(f"Build: {APP_BUILD}")
+
+# =============================
+# Firebase Web SDK (for client-side Google sign-in)
+# =============================
+FIREBASE_WEB_CONFIG = {
+    "apiKey": "AIzaSyA_dlivqpvqiYQVp0AC-yF1ZTkDSjIxVuE",
+    "authDomain": "whattoflie.firebaseapp.com",
+    "projectId": "whattoflie",
+    # optional:
+    # "appId": "1:583146758929:web:2672bcb153f8cd7144e2b0",
+    # "measurementId": "G-BN561D813G",
+}
+
+def _firebase_config_js(cfg: dict) -> str:
+    # Serialize to a JS object literal
+    items = ",".join([f'{k}:"{v}"' for k, v in cfg.items()])
+    return "{" + items + "}"
+
+def render_google_login_button():
+    components.html(f"""
+      <button id="google" style="padding:8px 12px;border-radius:8px;border:1px solid #ccc;cursor:pointer">
+        Sign in with Google
+      </button>
+      <script type="module">
+        import {{ initializeApp }} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+        import {{
+          getAuth, GoogleAuthProvider,
+          signInWithPopup, signInWithRedirect, getRedirectResult
+        }} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+
+        const firebaseConfig = {_firebase_config_js(FIREBASE_WEB_CONFIG)};
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+
+        async function finish(user) {{
+          const token = await user.getIdToken();
+          const uid = user.uid;
+          const email = encodeURIComponent(user.email || "");
+          const url = new URL(window.top.location.href);
+          url.searchParams.set("token", token);
+          url.searchParams.set("uid", uid);
+          url.searchParams.set("email", email);
+          window.top.location.href = url.toString();
+        }}
+
+        // complete a redirect sign-in if one just happened
+        getRedirectResult(auth).then(res => {{
+          if (res && res.user) finish(res.user);
+        }}).catch(()=>{{}});
+
+        document.getElementById("google").onclick = async () => {{
+          const provider = new GoogleAuthProvider();
+          try {{
+            const result = await signInWithPopup(auth, provider);
+            await finish(result.user);
+          }} catch (e) {{
+            // fallback if popup blocked
+            await signInWithRedirect(auth, provider);
+          }}
+        }};
+      </script>
+    """, height=90)
+
+def render_google_signout_button():
+    components.html(f"""
+      <button id="logout" style="padding:6px 10px;border-radius:8px;border:1px solid #ccc;cursor:pointer">
+        Sign out
+      </button>
+      <script type="module">
+        import {{ initializeApp }} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+        import {{ getAuth, signOut }} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+
+        const firebaseConfig = {_firebase_config_js(FIREBASE_WEB_CONFIG)};
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+
+        document.getElementById("logout").onclick = async () => {{
+          try {{ await signOut(auth); }} catch (e) {{}}
+          const url = new URL(window.top.location.href);
+          // tell the server to clear its session_state
+          url.searchParams.set("logout", "1");
+          // also strip any prior auth params
+          url.searchParams.delete("token");
+          url.searchParams.delete("uid");
+          url.searchParams.delete("email");
+          window.top.location.href = url.toString();
+        }};
+      </script>
+    """, height=70)
 
 # =============================
 # Optional: Access gate for private beta
@@ -28,7 +118,7 @@ if APP_PASSCODE:
         st.stop()
 
 # =============================
-# Firebase (Firestore) init — safe/no-op if secrets not present
+# Firebase Admin (server) for verifying ID tokens + Firestore
 # =============================
 try:
     import firebase_admin
@@ -54,10 +144,74 @@ def init_firestore():
 
 DB = init_firestore()
 
+try:
+    from firebase_admin import auth as admin_auth
+except Exception:
+    admin_auth = None
+
+def _maybe_handle_logout_flag():
+    # if the client added ?logout=1, clear server session and scrub URL
+    if st.query_params.get("logout"):
+        st.session_state.pop("firebase_uid", None)
+        st.session_state.pop("firebase_email", None)
+        qp = dict(st.query_params)
+        qp.pop("logout", None)
+        st.query_params.clear()
+        for k, v in qp.items():
+            st.query_params[k] = v
+
+def get_firebase_user():
+    """Verify ?token=... and cache uid/email in session; then strip token from URL."""
+    if admin_auth is None:
+        return None
+    tok = st.query_params.get("token", "")
+    if isinstance(tok, list):
+        tok = tok[0] if tok else ""
+    if not tok:
+        return None
+    try:
+        decoded = admin_auth.verify_id_token(tok)
+        st.session_state["firebase_uid"] = decoded.get("uid", "")
+        st.session_state["firebase_email"] = decoded.get("email", "")
+    except Exception:
+        decoded = None  # bad/expired token
+
+    # Clean the URL so the token isn't leaked if copied/shared
+    qp = dict(st.query_params)
+    for k in ("token", "uid", "email"):
+        qp.pop(k, None)
+    st.query_params.clear()
+    for k, v in qp.items():
+        st.query_params[k] = v
+    return decoded
+
+_maybe_handle_logout_flag()
+_ = get_firebase_user()
+
+# =============================
+# Legacy hashed ID helper + UID preference
+# =============================
+def doc_id_for(user_id: str) -> str:
+    secret = st.secrets.get("pepper", "local-dev")
+    return hmac.new(secret.encode(), str(user_id).strip().lower().encode(), hashlib.sha256).hexdigest()[:24]
+
+def _effective_user_doc_id(user_id_fallback: str) -> str:
+    uid = st.session_state.get("firebase_uid", "").strip()
+    return uid or doc_id_for(user_id_fallback)
+
+# =============================
+# Auth status banner + buttons
+# =============================
+if st.session_state.get("firebase_uid"):
+    st.success(f"Signed in as {st.session_state.get('firebase_email','')} ✅")
+    render_google_signout_button()
+else:
+    st.info("🔐 Sign in to sync your inventory & prefs.")
+    render_google_login_button()
+
 # =============================
 # Helpers — normalization, parsing, matching
 # =============================
-
 def normalize(token: str) -> str:
     if not isinstance(token, str):
         return ""
@@ -117,7 +271,6 @@ def load_flies_local(path: str) -> pd.DataFrame:
     return build_flies_df(raw)
 
 # ---------- GitHub fetch
-
 def gh_url(path: str) -> str:
     """Build a raw GitHub URL from secrets.
     Looks for [github].raw_base, or top-level raw_base, or gcp_service_account.raw_base.
@@ -150,7 +303,6 @@ def fetch_bytes_from_github(path: str) -> bytes | None:
     return None
 
 # ---------- Other cached loaders
-
 @st.cache_data
 def load_subs(path: str) -> dict[str, set[str]]:
     d = {}
@@ -214,7 +366,6 @@ def load_hook_families(path: str) -> dict[str, str]:
     return d
 
 # ---------- Matching logic
-
 def apply_alias(token: str, aliases: dict[str, str]) -> str:
     t = normalize(token)
     return aliases.get(t, t)
@@ -223,7 +374,6 @@ def map_aliases_list(items: list[str], aliases: dict[str,str]) -> list[str]:
     if not aliases:
         return items
     return [apply_alias(it, aliases) for it in items]
-
 
 def parse_color(token: str, color_map: dict[str,str]) -> tuple[str|None, str|None]:
     t = normalize(token)
@@ -238,7 +388,6 @@ def parse_color(token: str, color_map: dict[str,str]) -> tuple[str|None, str|Non
         if w in color_map:
             return w, color_map[w]
     return None, None
-
 
 def size_to_metric(size_str: str) -> float|None:
     if not size_str:
@@ -255,7 +404,6 @@ def size_to_metric(size_str: str) -> float|None:
         return 100 - n
     except:
         return None
-
 
 def parse_hook(token: str, hook_map: dict[str,str]) -> tuple[str|None, float|None, str|None]:
     t = normalize(token)
@@ -279,7 +427,6 @@ def parse_hook(token: str, hook_map: dict[str,str]) -> tuple[str|None, float|Non
         elif 'wet' in core: fam = 'wet'
     return fam, size_metric, length_tag
 
-
 def tokens_equal_loose(req: str, have: str, color_map: dict[str,str], ignore_labels: bool, ignore_color: bool) -> bool:
     req_token = strip_label(req) if ignore_labels else normalize(req)
     have_token = strip_label(have) if ignore_labels else normalize(have)
@@ -294,7 +441,6 @@ def tokens_equal_loose(req: str, have: str, color_map: dict[str,str], ignore_lab
             if req_base == have_base:
                 return True
     return False
-
 
 def hook_compatible(req: str, have: str, hook_map: dict[str,str], size_tolerance: int, require_length_match: bool) -> bool:
     if not isinstance(req, str) or not isinstance(have, str):
@@ -311,7 +457,6 @@ def hook_compatible(req: str, have: str, hook_map: dict[str,str], size_tolerance
         return True
     return abs(rsize - hsize) <= size_tolerance
 
-
 def expand_with_substitutions(inv_set: set[str], subs: dict[str, set[str]]) -> set[str]:
     expanded = set(inv_set)
     for base, eqs in subs.items():
@@ -320,7 +465,6 @@ def expand_with_substitutions(inv_set: set[str], subs: dict[str, set[str]]) -> s
         if any(eq in inv_set for eq in eqs):
             expanded.add(base)
     return expanded
-
 
 def compute_matches(flies_df: pd.DataFrame, inv_tokens: set[str], aliases_map: dict[str,str],
                     subs_map: dict[str, set[str]] | None, use_subs: bool, ignore_labels: bool,
@@ -355,7 +499,6 @@ def compute_matches(flies_df: pd.DataFrame, inv_tokens: set[str], aliases_map: d
         })
     return pd.DataFrame(results)
 
-
 def best_single_buys(matches_df: pd.DataFrame) -> pd.DataFrame:
     singles = matches_df[matches_df["missing_count"] == 1]["missing"]
     tokens = []
@@ -367,7 +510,6 @@ def best_single_buys(matches_df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=["material","unlocks"])
     rows = [{"material": m, "unlocks": n} for m, n in counter.most_common()]
     return pd.DataFrame(rows)
-
 
 def best_pair_buys(matches_df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
     pairs_counter = Counter()
@@ -381,7 +523,6 @@ def best_pair_buys(matches_df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
                 pairs_counter[pair] += 1
     rows = [{"materials_pair": " + ".join(pair), "unlocks": n} for pair, n in pairs_counter.most_common(top_n)]
     return pd.DataFrame(rows)
-
 
 def make_shopping_list(matches_df: pd.DataFrame, max_missing: int = 2) -> pd.DataFrame:
     subset = matches_df[(matches_df["missing_count"] >= 1) & (matches_df["missing_count"] <= max_missing)]
@@ -430,11 +571,9 @@ def load_brand_prefs(path: str) -> dict[str,list[str]]:
         pass
     return d
 
-
 def canonical_brand(name: str, brand_aliases: dict[str,str]) -> str:
     n = normalize(name)
     return brand_aliases.get(n, name)
-
 
 def suggest_hook_brand_model(req_token: str, hooks_catalog: pd.DataFrame, brand_prefs: dict[str,list[str]], hook_map: dict[str,str]):
     rfam, rsize, rlen = parse_hook(req_token, hook_map)
@@ -458,7 +597,6 @@ def suggest_hook_brand_model(req_token: str, hooks_catalog: pd.DataFrame, brand_
     row = df.iloc[0]
     return row['brand'], row['model']
 
-
 def enrich_buy_suggestions(df: pd.DataFrame, prefer_brands: bool, hooks_catalog: pd.DataFrame, brand_prefs: dict[str,list[str]], hook_map: dict[str,str]) -> pd.DataFrame:
     if df is None or df.empty:
         return df
@@ -479,7 +617,6 @@ def enrich_buy_suggestions(df: pd.DataFrame, prefer_brands: bool, hooks_catalog:
         df['suggested_model'] = models
     return df
 
-
 def validate_csv_schema(df: pd.DataFrame, required_cols: list[str], name: str) -> list[str]:
     errors = []
     missing = [c for c in required_cols if c not in df.columns]
@@ -489,7 +626,6 @@ def validate_csv_schema(df: pd.DataFrame, required_cols: list[str], name: str) -
         if col in df.columns and df[col].isnull().all():
             errors.append(f"{name}: column '{col}' is entirely empty")
     return errors
-
 
 def safe_read_csv(file_or_path, required_cols: list[str] | None = None) -> pd.DataFrame:
     """
@@ -508,7 +644,6 @@ def safe_read_csv(file_or_path, required_cols: list[str] | None = None) -> pd.Da
             except Exception:
                 continue
     raise ValueError("Could not parse CSV. Please check the headers and delimiter.")
-
 
 def first_http_link(text: str) -> str:
     if not isinstance(text, str):
@@ -933,13 +1068,12 @@ with st.expander("🆕 Create a new recipe from a tutorial"):
 # =============================
 # Cloud sync: Account + prefs (only if DB configured)
 # =============================
-
-def doc_id_for(user_id: str) -> str:
-    secret = st.secrets.get("pepper", "local-dev")
-    return hmac.new(secret.encode(), user_id.strip().lower().encode(), hashlib.sha256).hexdigest()[:24]
-
-if "account_id" not in st.session_state:
-    st.session_state["account_id"] = ""
+def _current_doc_id():
+    uid = st.session_state.get("firebase_uid", "").strip()
+    if uid:
+        return uid
+    # Legacy fallback: your existing text field
+    return st.session_state.get("account_id", "").strip().lower()
 
 qp = st.query_params
 if "acct" in qp and not st.session_state.get("account_id"):
@@ -974,47 +1108,46 @@ acct_id_prefs = st.text_input(
 )
 
 # Firestore helpers
-
 def save_user_inventory(user_id: str, inv_df: pd.DataFrame) -> bool:
-    if DB is None or not isinstance(user_id, str) or not user_id.strip():
+    if DB is None:
         return False
     try:
-        doc_ref = DB.collection("users").document(doc_id_for(user_id)).collection("app").document("inventory")
-        doc_ref.set({"rows": inv_df.to_dict(orient="records")}, merge=True)
+        doc_id = _effective_user_doc_id(user_id)
+        DB.collection("users").document(doc_id).collection("app").document("inventory") \
+          .set({"rows": inv_df.to_dict(orient="records")}, merge=True)
         return True
     except Exception as e:
         st.error(f"Failed to save inventory: {e}")
         return False
 
 def load_user_inventory(user_id: str) -> pd.DataFrame | None:
-    if DB is None or not isinstance(user_id, str) or not user_id.strip():
+    if DB is None:
         return None
     try:
-        doc_ref = DB.collection("users").document(doc_id_for(user_id)).collection("app").document("inventory")
-        doc = doc_ref.get()
-        if doc.exists:
-            rows = doc.to_dict().get("rows", [])
-            return pd.DataFrame(rows)
-        return None
+        doc_id = _effective_user_doc_id(user_id)
+        doc = DB.collection("users").document(doc_id).collection("app").document("inventory").get()
+        return pd.DataFrame(doc.to_dict().get("rows", [])) if doc.exists else None
     except Exception as e:
         st.error(f"Failed to load inventory: {e}")
         return None
 
 def save_user_prefs(user_id: str, prefs: dict) -> bool:
-    if DB is None or not isinstance(user_id, str) or not user_id.strip():
+    if DB is None:
         return False
     try:
-        DB.collection("users").document(doc_id_for(user_id)).collection("app").document("preferences").set(prefs, merge=True)
+        doc_id = _effective_user_doc_id(user_id)
+        DB.collection("users").document(doc_id).collection("app").document("preferences").set(prefs, merge=True)
         return True
     except Exception as e:
         st.error(f"Failed to save preferences: {e}")
         return False
 
 def load_user_prefs(user_id: str) -> dict | None:
-    if DB is None or not isinstance(user_id, str) or not user_id.strip():
+    if DB is None:
         return None
     try:
-        doc = DB.collection("users").document(doc_id_for(user_id)).collection("app").document("preferences").get()
+        doc_id = _effective_user_doc_id(user_id)
+        doc = DB.collection("users").document(doc_id).collection("app").document("preferences").get()
         return doc.to_dict() if doc.exists else None
     except Exception as e:
         st.error(f"Failed to load preferences: {e}")
@@ -1514,7 +1647,6 @@ with tabW:
             mime="text/csv"
         )
 
-
 # =============================
 # Export bundle
 # =============================
@@ -1558,3 +1690,26 @@ if st.button("Build ZIP bundle"):
         file_name="fly_tying_recommender_bundle.zip",
         mime="application/zip"
     )
+
+def log_event(name: str, payload: dict):
+    if DB is None: return
+    try:
+        ev = {"name": name, "ts": pd.Timestamp.utcnow().isoformat(), **payload}
+        DB.collection("events").add(ev)
+    except Exception as e:
+        st.warning(f"Analytics not saved: {e}")
+
+# right after matches_df is computed and Summary metrics are calculated:
+log_event("run_matching", {
+    "acct": st.session_state.get("account_id",""),
+    "inventory_source": inv_source,
+    "inv_count": len(inv_tokens),
+    "can_tie": int((matches_df["missing_count"] == 0).sum()),
+    "miss1":  int((matches_df["missing_count"] == 1).sum()),
+    "miss2":  int((matches_df["missing_count"] == 2).sum()),
+    "size_tol": size_tol,
+    "ignore_labels": ignore_labels,
+    "ignore_color": ignore_color,
+    "prefer_brands": prefer_brands,
+    "src": st.query_params.get("src", "")
+})
