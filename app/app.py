@@ -1251,11 +1251,7 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 # Tabs
-with st.tabs(["✅ Can tie now", "🟡 Missing 1", "🟠 Missing 2", f"🟣 Near misses (≤{near_miss_cap})", "🛒 Best buys", "📦 Inventory status & brands", "🧪 What-if"]) as tabs:
-    pass
-
-# Because of Streamlit's API, rebuild explicit tab blocks
-_tab1, _tab2, _tab3, _tabN, _tab4, _tab5, _tabW = st.tabs([
+tab1, tab2, tab3, tabN, tab4, tab5, tabW = st.tabs([
     "✅ Can tie now",
     "🟡 Missing 1",
     "🟠 Missing 2",
@@ -1264,6 +1260,7 @@ _tab1, _tab2, _tab3, _tabN, _tab4, _tab5, _tabW = st.tabs([
     "📦 Inventory status & brands",
     "🧪 What-if"
 ])
+
 
 with _tab1:
     df = apply_filters(matches_df[matches_df["missing_count"] == 0])
