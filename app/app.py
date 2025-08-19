@@ -1,7 +1,8 @@
-# Replace the top section of your app.py with this clean version
+# app.py
 
 import streamlit as st
 import pandas as pd
+import os
 import re
 from collections import Counter
 import itertools
@@ -21,6 +22,24 @@ st.set_page_config(page_title="🪶 Fly Tying Recommender", page_icon="🪶", la
 APP_BUILD = "debug-v3"
 st.caption(f"Build: {APP_BUILD}")
 
+@st.cache_data
+def gh_url(path: str) -> str | None:
+    """Build a Raw GitHub URL from .streamlit/secrets.toml [github].raw_base or env GITHUB_RAW_BASE."""
+    import os
+    try:
+        base = None
+        gh = st.secrets.get("github", {})
+        if isinstance(gh, dict):
+            base = gh.get("raw_base")
+        if not base:
+            base = os.getenv("GITHUB_RAW_BASE")
+        if not base:
+            return None
+        return f"{str(base).rstrip('/')}/{str(path).lstrip('/')}"
+    except Exception:
+        return None
+
+
 # =============================
 # Firebase Admin Setup (Clean)
 # =============================
@@ -30,49 +49,39 @@ admin_auth = None
 try:
     import firebase_admin
     from firebase_admin import credentials, firestore, auth as admin_auth
-    
-    # Check if already initialized
+
     if not firebase_admin._apps:
-        # Get service account from secrets
         service_account_info = st.secrets.get("gcp_service_account")
         if service_account_info:
-            # Convert service account info to the format Firebase expects
-            service_account_dict = dict(service_account_info)
-            cred = credentials.Certificate(service_account_dict)
+            cred = credentials.Certificate(dict(service_account_info))
             firebase_admin.initialize_app(cred)
             st.success("✅ Firebase Admin initialized successfully")
         else:
             st.error("❌ No Firebase service account found in secrets")
-    
-    # Initialize Firestore client
     DB = firestore.client()
     st.success("✅ Firestore client ready")
-    
 except ImportError:
     st.error("❌ firebase-admin not installed")
 except Exception as e:
     st.error(f"❌ Firebase initialization failed: {e}")
-    # Continue without Firebase for now
 
 # =============================
 # Firebase Web SDK Config
 # =============================
-FIREBASE_WEB_CONFIG = {
+FIREBASE_WEB_CONFIG = dict(st.secrets.get("firebase_web", {})) or {
     "apiKey": "AIzaSyA_dlivqpvqiYQVp0AC-yF1ZTkDSjIxVuE",
     "authDomain": "whattoflie.firebaseapp.com",
     "projectId": "whattoflie",
+    # Optional keys (appId, storageBucket, etc.) may be present in secrets
 }
-
-def _firebase_config_js(cfg: dict) -> str:
-    items = ",".join([f'"{k}":"{v}"' for k, v in cfg.items()])
-    return "{" + items + "}"
 
 # =============================
 # Improved Google Sign-In
 # =============================
 def render_google_login_button():
-    """Debug version with more verbose logging"""
-    components.html(f"""
+    cfg_js = json.dumps(FIREBASE_WEB_CONFIG, separators=(",", ":"))
+    components.html(
+        f"""
         <div style="text-align: center; padding: 20px; border: 2px solid #4285f4; border-radius: 8px;">
             <button id="google-signin" style="
                 padding: 12px 24px; 
@@ -90,111 +99,69 @@ def render_google_login_button():
             <div id="debug" style="margin-top: 10px; color: #999; font-size: 12px;">Debug info will appear here</div>
             <div id="errors" style="margin-top: 10px; color: #dc3545; font-size: 12px;"></div>
         </div>
-        
-        <script>
-            console.log("🔥 Script loaded - checking if this appears in browser console");
-            
+
+        <script type="module">
             const statusEl = document.getElementById("status");
             const debugEl = document.getElementById("debug");
             const errorsEl = document.getElementById("errors");
-            
+
             statusEl.textContent = "JavaScript loaded successfully";
-            debugEl.textContent = "Attempting to load Firebase modules...";
-            
-            // Test if the button click works at all
-            document.getElementById("google-signin").onclick = () => {{
-                console.log("🔥 Button clicked!");
-                statusEl.textContent = "Button clicked - starting authentication...";
+            debugEl.textContent = "Click the button to start Firebase auth...";
+
+            document.getElementById("google-signin").onclick = async () => {{
+                statusEl.textContent = "Starting authentication...";
                 debugEl.textContent = "Loading Firebase modules...";
-                
-                // Try to load Firebase
-                loadFirebaseAndAuth();
-            }};
-            
-            async function loadFirebaseAndAuth() {{
+
                 try {{
-                    console.log("🔥 Loading Firebase modules...");
-                    debugEl.textContent = "Importing Firebase...";
-                    
                     const {{ initializeApp }} = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js");
-                    console.log("✅ Firebase app module loaded");
-                    
-                    const {{ 
-                        getAuth, 
+                    const {{
+                        getAuth,
                         GoogleAuthProvider,
-                        signInWithPopup, 
-                        signInWithRedirect, 
-                        getRedirectResult 
+                        signInWithPopup,
+                        signInWithRedirect,
+                        getRedirectResult
                     }} = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js");
-                    console.log("✅ Firebase auth module loaded");
-                    
-                    debugEl.textContent = "Firebase modules loaded, initializing...";
-                    
-                    // Initialize Firebase
-                    const firebaseConfig = {_firebase_config_js(FIREBASE_WEB_CONFIG)};
-                    console.log("🔥 Firebase config:", firebaseConfig);
-                    
+
+                    const firebaseConfig = {cfg_js};
                     const app = initializeApp(firebaseConfig);
-                    console.log("✅ Firebase app initialized");
-                    
                     const auth = getAuth(app);
                     const provider = new GoogleAuthProvider();
-                    console.log("✅ Auth and provider ready");
-                    
-                    debugEl.textContent = "Attempting popup sign-in...";
-                    statusEl.textContent = "Opening Google sign-in...";
-                    
-                    // Try popup
+
                     try {{
-                        console.log("🔥 Attempting popup sign-in...");
+                        statusEl.textContent = "Opening Google sign-in...";
                         const result = await signInWithPopup(auth, provider);
-                        console.log("✅ Popup sign-in successful!", result.user.email);
-                        
-                        statusEl.textContent = "Sign-in successful! Getting token...";
-                        
                         const token = await result.user.getIdToken();
-                        console.log("✅ Token received");
-                        
-                        // Redirect with token
+
                         const url = new URL(window.location.href);
                         url.searchParams.set("token", token);
-                        url.searchParams.set("uid", result.user.uid);
+                        url.searchParams.set("uid", result.user.uid || "");
                         url.searchParams.set("email", encodeURIComponent(result.user.email || ""));
-                        
                         statusEl.textContent = "Redirecting...";
                         window.location.href = url.toString();
-                        
                     }} catch (popupError) {{
-                        console.error("❌ Popup failed:", popupError);
-                        debugEl.textContent = "Popup failed: " + popupError.code + " - trying redirect...";
-                        
-                        // Try redirect fallback
+                        debugEl.textContent = "Popup failed: " + (popupError && popupError.code ? popupError.code : "unknown") + " — trying redirect...";
                         try {{
-                            console.log("🔥 Attempting redirect sign-in...");
                             statusEl.textContent = "Redirecting to Google...";
                             await signInWithRedirect(auth, provider);
                         }} catch (redirectError) {{
-                            console.error("❌ Redirect also failed:", redirectError);
-                            errorsEl.textContent = "Both popup and redirect failed: " + redirectError.message;
+                            errorsEl.textContent = "Both popup and redirect failed: " + (redirectError && redirectError.message ? redirectError.message : redirectError);
                             statusEl.textContent = "Sign-in failed";
                         }}
                     }}
-                    
                 }} catch (importError) {{
-                    console.error("❌ Firebase import error:", importError);
-                    errorsEl.textContent = "Firebase import failed: " + importError.message;
+                    errorsEl.textContent = "Firebase import failed: " + (importError && importError.message ? importError.message : importError);
                     statusEl.textContent = "Authentication system unavailable";
                     debugEl.textContent = "Check browser console for details";
                 }}
-            }}
-            
-            console.log("🔥 Script setup complete - button should be clickable");
+            }};
         </script>
-    """, height=200)
+        """,
+        height=220,
+    )
 
 def render_google_signout_button():
-    """Render sign-out button"""
-    components.html(f"""
+    components.html(
+        """
         <div style="text-align: center; padding: 10px;">
             <button id="logout" style="
                 padding: 8px 16px;
@@ -208,101 +175,73 @@ def render_google_signout_button():
                 Sign out
             </button>
         </div>
-        
         <script type="module">
-            document.getElementById("logout").onclick = () => {{
-                // Clear session and redirect
+            document.getElementById("logout").onclick = () => {
                 const url = new URL(window.location.href);
                 url.searchParams.set("logout", "1");
                 url.searchParams.delete("token");
                 url.searchParams.delete("uid"); 
                 url.searchParams.delete("email");
                 window.location.href = url.toString();
-            }};
+            };
         </script>
-    """, height=70)
+        """,
+        height=70,
+    )
 
 # =============================
 # Authentication Processing
 # =============================
+def clean_url():
+    current_params = dict(st.query_params)
+    for key in ["token", "uid", "email", "logout"]:
+        current_params.pop(key, None)
+    st.query_params.clear()
+    for key, value in current_params.items():
+        st.query_params[key] = value
+
 def get_firebase_user():
-    """Process authentication token from URL parameters"""
     if admin_auth is None:
         return None
-
-    # Get token from URL parameters
     token = st.query_params.get("token", "")
     if isinstance(token, list):
         token = token[0] if token else ""
-    
     if not token:
         return None
-
     try:
-        # Verify the token with Firebase Admin
         decoded_token = admin_auth.verify_id_token(token)
-        
-        # Store user info in session
         st.session_state["firebase_uid"] = decoded_token.get("uid", "")
         st.session_state["firebase_email"] = decoded_token.get("email", "")
-        
-        # Clean up URL parameters
         clean_url()
-        
         return decoded_token
-        
     except Exception as e:
         st.error(f"Authentication verification failed: {e}")
         return None
 
 def handle_logout():
-    """Handle logout request"""
     if st.query_params.get("logout"):
-        # Clear session state
         st.session_state.pop("firebase_uid", None)
         st.session_state.pop("firebase_email", None)
-        
-        # Clean up URL
         clean_url()
-        
         st.rerun()
 
-def clean_url():
-    """Clean authentication parameters from URL"""
-    # Get current params
-    current_params = dict(st.query_params)
-    
-    # Remove auth-related params
-    for key in ["token", "uid", "email", "logout"]:
-        current_params.pop(key, None)
-    
-    # Update URL
-    st.query_params.clear()
-    for key, value in current_params.items():
-        st.query_params[key] = value
-
-# =============================
-# Authentication Flow
-# =============================
 # Process any pending authentication
 handle_logout()
-user_data = get_firebase_user()
+_ = get_firebase_user()
 
 # Display authentication status
 st.markdown("### 🔐 Authentication Status")
-
 if st.session_state.get("firebase_uid"):
     user_email = st.session_state.get("firebase_email", "Unknown")
     st.success(f"✅ Signed in as: {user_email}")
-    
-    # Show user info for debugging
     with st.expander("Debug: User Info"):
-        st.json({
-            "uid": st.session_state.get("firebase_uid"),
-            "email": st.session_state.get("firebase_email"),
-            "db_available": DB is not None
-        })
-    
+        st.json(
+            {
+                "uid": st.session_state.get("firebase_uid"),
+                "email": st.session_state.get("firebase_email"),
+                "db_available": DB is not None,
+            }
+        )
     render_google_signout_button()
 else:
     st.info("🔑 Please sign in to sync your data across devices")
@@ -312,9 +251,6 @@ else:
 if st.query_params:
     with st.expander("Debug: URL Parameters"):
         st.json(dict(st.query_params))
-
-# Rest of your app code continues here...
-# (Keep all your existing functions and logic)
 
 # =============================
 # Legacy hashed ID helper + UID preference
@@ -327,7 +263,36 @@ def _effective_user_doc_id(user_id_fallback: str) -> str:
     uid = st.session_state.get("firebase_uid", "").strip()
     return uid or doc_id_for(user_id_fallback)
 
+# =============================
+# GitHub & local loaders (NO gh_url dependency)
+# =============================
+@st.cache_data
+def read_csv_from_github(path: str, *, sep=",") -> pd.DataFrame:
+    url = gh_url(path)
+    if url:
+        try:
+            return pd.read_csv(url, encoding="utf-8", sep=sep)
+        except Exception:
+            pass  # fall through to local
+    # local dev fallback
+    return pd.read_csv(path, encoding="utf-8", sep=sep)
 
+@st.cache_data
+def fetch_bytes_from_github(path: str) -> bytes | None:
+    url = gh_url(path)
+    if url:
+        try:
+            r = requests.get(url, timeout=10)
+            if r.ok:
+                return r.content
+        except Exception:
+            pass
+    # local dev fallback
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except Exception:
+        return None
 
 # =============================
 # Helpers — normalization, parsing, matching
@@ -340,10 +305,10 @@ def normalize(token: str) -> str:
 
 def strip_label(token: str) -> str:
     if not isinstance(token, str):
-        return ''
+        return ""
     t = token.strip().lower()
-    if ':' in t:
-        return t.split(':', 1)[1].strip()
+    if ":" in t:
+        return t.split(":", 1)[1].strip()
     return t
 
 def split_materials(materials_cell: str) -> list[str]:
@@ -390,10 +355,8 @@ def load_flies_local(path: str) -> pd.DataFrame:
     raw = pd.read_csv(path, encoding="utf-8", engine="python")
     return build_flies_df(raw)
 
-# ---------- GitHub fetch
 @st.cache_data
 def load_subs_local() -> dict[str, set[str]]:
-    """Load substitutions from local data directory"""
     d = {}
     try:
         sub_df = pd.read_csv("data/substitutions.csv", encoding="utf-8", engine="python")
@@ -417,13 +380,12 @@ def load_subs_local() -> dict[str, set[str]]:
 
 @st.cache_data
 def load_aliases_local() -> dict[str, str]:
-    """Load aliases from local data directory"""
     d = {}
     try:
         df = pd.read_csv("data/aliases.csv", encoding="utf-8", engine="python")
         for _, row in df.iterrows():
-            a = normalize(row.get('alias',''))
-            c = normalize(row.get('canonical',''))
+            a = normalize(row.get("alias", ""))
+            c = normalize(row.get("canonical", ""))
             if a and c:
                 d[a] = c
         st.success(f"✅ Loaded {len(d)} aliases")
@@ -433,28 +395,6 @@ def load_aliases_local() -> dict[str, str]:
         st.warning(f"⚠️ Error loading aliases: {e}")
     return d
 
-@st.cache_data
-def read_csv_from_github(path: str, *, sep=",") -> pd.DataFrame:
-    url = gh_url(path)
-    if not url or not url.startswith("http"):
-        raise FileNotFoundError("GitHub raw_base not configured in secrets. Add [github].raw_base pointing to raw.githubusercontent.com.")
-    try:
-        return pd.read_csv(url, encoding="utf-8", sep=sep)
-    except Exception as e:
-        raise FileNotFoundError(f"GitHub file not found or unreadable: {url}\n{e}")
-
-@st.cache_data
-def fetch_bytes_from_github(path: str) -> bytes | None:
-    url = gh_url(path)
-    try:
-        r = requests.get(url, timeout=10)
-        if r.ok:
-            return r.content
-    except Exception:
-        pass
-    return None
-
-# ---------- Other cached loaders
 @st.cache_data
 def load_subs(path: str) -> dict[str, set[str]]:
     d = {}
@@ -481,8 +421,8 @@ def load_aliases(path: str) -> dict[str, str]:
     try:
         df = pd.read_csv(path, encoding="utf-8", engine="python")
         for _, row in df.iterrows():
-            a = normalize(row.get('alias',''))
-            c = normalize(row.get('canonical',''))
+            a = normalize(row.get("alias", ""))
+            c = normalize(row.get("canonical", ""))
             if a and c:
                 d[a] = c
     except Exception:
@@ -495,8 +435,8 @@ def load_color_families(path: str) -> dict[str, str]:
     try:
         df = pd.read_csv(path, encoding="utf-8", engine="python")
         for _, row in df.iterrows():
-            c = normalize(row.get("color",""))
-            fam = normalize(row.get("family",""))
+            c = normalize(row.get("color", ""))
+            fam = normalize(row.get("family", ""))
             if c and fam:
                 d[c] = fam
     except Exception:
@@ -509,25 +449,15 @@ def load_hook_families(path: str) -> dict[str, str]:
     try:
         df = pd.read_csv(path, encoding="utf-8", engine="python")
         for _, row in df.iterrows():
-            kw = normalize(row.get("keyword",""))
-            fam = normalize(row.get("family",""))
+            kw = normalize(row.get("keyword", ""))
+            fam = normalize(row.get("family", ""))
             if kw and fam:
                 d[kw] = fam
     except Exception:
         pass
     return d
 
-# ---------- Matching logic
-def apply_alias(token: str, aliases: dict[str, str]) -> str:
-    t = normalize(token)
-    return aliases.get(t, t)
-
-def map_aliases_list(items: list[str], aliases: dict[str,str]) -> list[str]:
-    if not aliases:
-        return items
-    return [apply_alias(it, aliases) for it in items]
-
-def parse_color(token: str, color_map: dict[str,str]) -> tuple[str|None, str|None]:
+def parse_color(token: str, color_map: dict[str, str]) -> tuple[str | None, str | None]:
     t = normalize(token)
     words = t.split()
     if not words:
@@ -541,30 +471,30 @@ def parse_color(token: str, color_map: dict[str,str]) -> tuple[str|None, str|Non
             return w, color_map[w]
     return None, None
 
-def size_to_metric(size_str: str) -> float|None:
+def size_to_metric(size_str: str) -> float | None:
     if not size_str:
         return None
-    s = size_str.strip().lower().lstrip('#')
-    if '/0' in s:
+    s = size_str.strip().lower().lstrip("#")
+    if "/0" in s:
         try:
-            n = int(s.replace('/0',''))
+            n = int(s.replace("/0", ""))
             return 100 + n
-        except:
+        except Exception:
             return None
     try:
         n = int(s)
         return 100 - n
-    except:
+    except Exception:
         return None
 
-def parse_hook(token: str, hook_map: dict[str,str]) -> tuple[str|None, float|None, str|None]:
+def parse_hook(token: str, hook_map: dict[str, str]) -> tuple[str | None, float | None, str | None]:
     t = normalize(token)
-    if not t.startswith('hook:'):
+    if not t.startswith("hook:"):
         return None, None, None
-    core = t.split(':',1)[1].strip()
-    m = re.search(r'#\s*([0-9]+(?:/0)?)', core)
+    core = t.split(":", 1)[1].strip()
+    m = re.search(r"#\s*([0-9]+(?:/0)?)", core)
     size_metric = size_to_metric(m.group(1)) if m else None
-    m2 = re.search(r'\b([0-9]+xl)\b', core)
+    m2 = re.search(r"\b([0-9]+xl)\b", core)
     length_tag = m2.group(1) if m2 else None
     fam = None
     for kw, f in hook_map.items():
@@ -572,14 +502,34 @@ def parse_hook(token: str, hook_map: dict[str,str]) -> tuple[str|None, float|Non
             fam = f
             break
     if fam is None:
-        if 'streamer' in core: fam = 'streamer'
-        elif 'nymph' in core or 'midge' in core or 'scud' in core: fam = 'nymph'
-        elif 'dry' in core: fam = 'dry'
-        elif 'jig' in core: fam = 'jig'
-        elif 'wet' in core: fam = 'wet'
+        if "streamer" in core:
+            fam = "streamer"
+        elif "nymph" in core or "midge" in core or "scud" in core:
+            fam = "nymph"
+        elif "dry" in core:
+            fam = "dry"
+        elif "jig" in core:
+            fam = "jig"
+        elif "wet" in core:
+            fam = "wet"
     return fam, size_metric, length_tag
 
-def tokens_equal_loose(req: str, have: str, color_map: dict[str,str], ignore_labels: bool, ignore_color: bool) -> bool:
+def apply_alias(token: str, aliases: dict[str, str]) -> str:
+    t = normalize(token)
+    return aliases.get(t, t)
+
+def map_aliases_list(items: list[str], aliases: dict[str, str]) -> list[str]:
+    if not aliases:
+        return items
+    return [apply_alias(it, aliases) for it in items]
+
+def tokens_equal_loose(
+    req: str,
+    have: str,
+    color_map: dict[str, str],
+    ignore_labels: bool,
+    ignore_color: bool,
+) -> bool:
     req_token = strip_label(req) if ignore_labels else normalize(req)
     have_token = strip_label(have) if ignore_labels else normalize(have)
     if req_token == have_token:
@@ -588,13 +538,19 @@ def tokens_equal_loose(req: str, have: str, color_map: dict[str,str], ignore_lab
         rc, rf = parse_color(req_token, color_map)
         hc, hf = parse_color(have_token, color_map)
         if rf and hf and rf == hf:
-            req_base = req_token.replace(f' {rc}', '') if rc else req_token
-            have_base = have_token.replace(f' {hc}', '') if hc else have_token
+            req_base = req_token.replace(f" {rc}", "") if rc else req_token
+            have_base = have_token.replace(f" {hc}", "") if hc else have_token
             if req_base == have_base:
                 return True
     return False
 
-def hook_compatible(req: str, have: str, hook_map: dict[str,str], size_tolerance: int, require_length_match: bool) -> bool:
+def hook_compatible(
+    req: str,
+    have: str,
+    hook_map: dict[str, str],
+    size_tolerance: int,
+    require_length_match: bool,
+) -> bool:
     if not isinstance(req, str) or not isinstance(have, str):
         return False
     rfam, rsize, rlen = parse_hook(req, hook_map)
@@ -618,10 +574,19 @@ def expand_with_substitutions(inv_set: set[str], subs: dict[str, set[str]]) -> s
             expanded.add(base)
     return expanded
 
-def compute_matches(flies_df: pd.DataFrame, inv_tokens: set[str], aliases_map: dict[str,str],
-                    subs_map: dict[str, set[str]] | None, use_subs: bool, ignore_labels: bool,
-                    ignore_color: bool, color_map: dict[str,str], hook_map: dict[str,str],
-                    size_tolerance: int, require_length_match: bool):
+def compute_matches(
+    flies_df: pd.DataFrame,
+    inv_tokens: set[str],
+    aliases_map: dict[str, str],
+    subs_map: dict[str, set[str]] | None,
+    use_subs: bool,
+    ignore_labels: bool,
+    ignore_color: bool,
+    color_map: dict[str, str],
+    hook_map: dict[str, str],
+    size_tolerance: int,
+    require_length_match: bool,
+):
     inv_tokens_alias = {apply_alias(tok, aliases_map) for tok in inv_tokens}
     if use_subs and subs_map:
         inv = expand_with_substitutions(inv_tokens_alias, subs_map)
@@ -633,22 +598,28 @@ def compute_matches(flies_df: pd.DataFrame, inv_tokens: set[str], aliases_map: d
         req_list = map_aliases_list(row["materials_list"], aliases_map)
         missing = []
         for mreq in req_list:
-            if normalize(mreq).startswith('hook:'):
-                ok = any(have for have in inv if hook_compatible(mreq, have, hook_map, size_tolerance, require_length_match))
+            if normalize(mreq).startswith("hook:"):
+                ok = any(
+                    have
+                    for have in inv
+                    if hook_compatible(mreq, have, hook_map, size_tolerance, require_length_match)
+                )
                 if not ok:
                     missing.append(mreq)
                 continue
             ok = any(tokens_equal_loose(mreq, have, color_map, ignore_labels, ignore_color) for have in inv)
             if not ok:
                 missing.append(mreq)
-        results.append({
-            "fly_name": row["fly_name"],
-            "type": row["type"],
-            "species": "; ".join(row["species"]),
-            "required_count": len(req_list),
-            "missing_count": len(missing),
-            "missing": "; ".join(missing),
-        })
+        results.append(
+            {
+                "fly_name": row["fly_name"],
+                "type": row["type"],
+                "species": "; ".join(row["species"]),
+                "required_count": len(req_list),
+                "missing_count": len(missing),
+                "missing": "; ".join(missing),
+            }
+        )
     return pd.DataFrame(results)
 
 def best_single_buys(matches_df: pd.DataFrame) -> pd.DataFrame:
@@ -659,7 +630,7 @@ def best_single_buys(matches_df: pd.DataFrame) -> pd.DataFrame:
             tokens.extend([t.strip() for t in cell.split(";") if t.strip()])
     counter = Counter(tokens)
     if not counter:
-        return pd.DataFrame(columns=["material","unlocks"])
+        return pd.DataFrame(columns=["material", "unlocks"])
     rows = [{"material": m, "unlocks": n} for m, n in counter.most_common()]
     return pd.DataFrame(rows)
 
@@ -688,13 +659,13 @@ def make_shopping_list(matches_df: pd.DataFrame, max_missing: int = 2) -> pd.Dat
     return out
 
 @st.cache_data
-def load_brand_aliases(path: str) -> dict[str,str]:
+def load_brand_aliases(path: str) -> dict[str, str]:
     m = {}
     try:
         df = pd.read_csv(path, encoding="utf-8", engine="python")
         for _, row in df.iterrows():
-            a = normalize(row.get("alias",""))
-            b = row.get("brand","")
+            a = normalize(row.get("alias", ""))
+            b = row.get("brand", "")
             if a and b:
                 m[a] = b
     except Exception:
@@ -706,16 +677,16 @@ def load_hooks_catalog(path: str) -> pd.DataFrame:
     try:
         return pd.read_csv(path, encoding="utf-8", engine="python")
     except Exception:
-        return pd.DataFrame(columns=["brand","model","family","length_tag","wire","eye","barbless","notes"])
+        return pd.DataFrame(columns=["brand", "model", "family", "length_tag", "wire", "eye", "barbless", "notes"])
 
 @st.cache_data
-def load_brand_prefs(path: str) -> dict[str,list[str]]:
+def load_brand_prefs(path: str) -> dict[str, list[str]]:
     d = {}
     try:
         df = pd.read_csv(path, encoding="utf-8", engine="python")
         for _, row in df.iterrows():
-            cat = normalize(row.get("category",""))
-            prefs = row.get("preferred_brands","")
+            cat = normalize(row.get("category", ""))
+            prefs = row.get("preferred_brands", "")
             arr = [p.strip() for p in str(prefs).split(";") if str(p).strip()]
             if cat:
                 d[cat] = arr
@@ -723,50 +694,58 @@ def load_brand_prefs(path: str) -> dict[str,list[str]]:
         pass
     return d
 
-def canonical_brand(name: str, brand_aliases: dict[str,str]) -> str:
+def canonical_brand(name: str, brand_aliases: dict[str, str]) -> str:
     n = normalize(name)
     return brand_aliases.get(n, name)
 
-def suggest_hook_brand_model(req_token: str, hooks_catalog: pd.DataFrame, brand_prefs: dict[str,list[str]], hook_map: dict[str,str]):
+def suggest_hook_brand_model(
+    req_token: str, hooks_catalog: pd.DataFrame, brand_prefs: dict[str, list[str]], hook_map: dict[str, str]
+):
     rfam, rsize, rlen = parse_hook(req_token, hook_map)
     if rfam is None:
         return None, None
     df = hooks_catalog.copy()
-    df = df[df['family'].fillna('').str.lower() == rfam]
+    df = df[df["family"].fillna("").str.lower() == rfam]
     if rlen:
-        df2 = df[df['length_tag'].fillna('').str.lower() == rlen.lower()]
+        df2 = df[df["length_tag"].fillna("").str.lower() == rlen.lower()]
         if not df2.empty:
             df = df2
     if df.empty:
         return None, None
-    prefs = brand_prefs.get('hook', [])
+    prefs = brand_prefs.get("hook", [])
     if prefs:
         for pb in prefs:
-            cand = df[df['brand'].str.lower() == pb.lower()]
+            cand = df[df["brand"].str.lower() == pb.lower()]
             if not cand.empty:
                 row = cand.iloc[0]
-                return row['brand'], row['model']
+                return row["brand"], row["model"]
     row = df.iloc[0]
-    return row['brand'], row['model']
+    return row["brand"], row["model"]
 
-def enrich_buy_suggestions(df: pd.DataFrame, prefer_brands: bool, hooks_catalog: pd.DataFrame, brand_prefs: dict[str,list[str]], hook_map: dict[str,str]) -> pd.DataFrame:
+def enrich_buy_suggestions(
+    df: pd.DataFrame,
+    prefer_brands: bool,
+    hooks_catalog: pd.DataFrame,
+    brand_prefs: dict[str, list[str]],
+    hook_map: dict[str, str],
+) -> pd.DataFrame:
     if df is None or df.empty:
         return df
     brands = []
     models = []
-    for m in df['material'] if 'material' in df.columns else []:
+    for m in df["material"] if "material" in df.columns else []:
         mtok = normalize(m)
-        if mtok.startswith('hook:') and prefer_brands:
+        if mtok.startswith("hook:") and prefer_brands:
             b, mod = suggest_hook_brand_model(mtok, hooks_catalog, brand_prefs, hook_map)
-            brands.append(b or '')
-            models.append(mod or '')
+            brands.append(b or "")
+            models.append(mod or "")
         else:
-            brands.append('')
-            models.append('')
-    if 'material' in df.columns:
+            brands.append("")
+            models.append("")
+    if "material" in df.columns:
         df = df.copy()
-        df['suggested_brand'] = brands
-        df['suggested_model'] = models
+        df["suggested_brand"] = brands
+        df["suggested_model"] = models
     return df
 
 def validate_csv_schema(df: pd.DataFrame, required_cols: list[str], name: str) -> list[str]:
@@ -780,10 +759,6 @@ def validate_csv_schema(df: pd.DataFrame, required_cols: list[str], name: str) -
     return errors
 
 def safe_read_csv(file_or_path, required_cols: list[str] | None = None) -> pd.DataFrame:
-    """
-    Tries UTF-8 then latin-1, and falls back to semicolon delimiter if commas fail.
-    Only used for *user-uploaded* CSVs; your bundled files can keep the normal loader.
-    """
     for enc in ("utf-8", "latin-1"):
         for sep in (",", ";"):
             try:
@@ -817,11 +792,13 @@ def build_known_brands_aliases() -> dict[str, str]:
             m = load_brand_aliases("data/brand_aliases.csv")
         return m
 
-    alias_map = _load_default_brand_aliases()                  # alias -> Brand (as-is)
-    hooks = load_hooks_catalog("data/hooks_catalog.csv")       # may contain unseen brands
+    alias_map = _load_default_brand_aliases()
+    hooks = load_hooks_catalog("data/hooks_catalog.csv")
 
     known = {normalize(k): v for k, v in alias_map.items()}
-    passthrough = set([normalize(b) for b in (hooks["brand"].dropna().unique().tolist() if not hooks.empty else [])])
+    passthrough = set(
+        [normalize(b) for b in (hooks["brand"].dropna().unique().tolist() if not hooks.empty else [])]
+    )
     passthrough.update(["wapsi", "hareline", "uni", "veevus", "utc", "semperfli"])
     for b in passthrough:
         if b and b not in known:
@@ -866,26 +843,39 @@ st.markdown(
 # Sidebar — onboarding & data sources
 # =============================
 with st.sidebar:
-    st.info("This tool accepts CSVs with specific headers. Download templates below and follow the examples to avoid formatting issues.")
+    st.info(
+        "This tool accepts CSVs with specific headers. Download templates below and follow the examples to avoid formatting issues."
+    )
 
     with st.expander("🧭 Onboarding Checklist", expanded=True):
-        if st.button("🚀 Quick Start (use bundled data & run)", use_container_width=True, help="Loads the bundled CSVs and jumps straight to results"):
+        if st.button(
+            "🚀 Quick Start (use bundled data & run)",
+            use_container_width=True,
+            help="Loads the bundled CSVs and jumps straight to results",
+        ):
             st.session_state["quickstart_run"] = True
             st.rerun()
-        st.markdown("- Download **CSV templates**\n- Fill them in (keep headers)\n- Upload here\n- Toggle matching options as desired\n- Review results + Download shopping list")
+        st.markdown(
+            "- Download **CSV templates**\n- Fill them in (keep headers)\n- Upload here\n- Toggle matching options as desired\n- Review results + Download shopping list"
+        )
 
     with st.expander("📄 Examples & Templates", expanded=False):
-        st.code("""flies.csv headers:
+        st.code(
+            """flies.csv headers:
 fly_name,type,species,materials,tutorials
 Elk Hair Caddis (olive),Dry,trout;panfish,hook: dry #12; thread: 8/0 brown; body: dry dubbing olive; rib: gold wire; wing: elk hair; hackle: brown rooster saddle,https://www.youtube.com/watch?v=EXAMPLE
-""", language="text")
-        st.code("""inventory.csv headers:
+""",
+            language="text",
+        )
+        st.code(
+            """inventory.csv headers:
 material,status,brand,model
 thread: 8/0 brown,HALF,UNI,
 elk hair,LOW,Nature's Spirit,
-""", language="text")
+""",
+            language="text",
+        )
 
-        # Download template buttons (try GitHub, fallback to embedded bytes)
         st.markdown("### 📥 Download CSV templates")
         FALLBACKS = {
             "data/templates/flies_template.csv": b"fly_name,type,species,materials,tutorials\nElk Hair Caddis (olive),Dry,trout;panfish,hook: dry #12; thread: 8/0 brown; body: dry dubbing olive; rib: gold wire; wing: elk hair; hackle: brown rooster saddle,https://www.youtube.com/watch?v=EXAMPLE\n",
@@ -910,8 +900,8 @@ elk hair,LOW,Nature's Spirit,
     flies_file = st.file_uploader("Upload your flies.csv", type=["csv"], key="flies_csv")
     if flies_file is not None:
         try:
-            raw_flies = safe_read_csv(io.BytesIO(flies_file.getvalue()), required_cols=["fly_name","type","species","materials"])
-            errs = validate_csv_schema(coerce_flies_columns(raw_flies.copy()), ["fly_name","type","species","materials"], "flies.csv")
+            raw_flies = safe_read_csv(io.BytesIO(flies_file.getvalue()), required_cols=["fly_name", "type", "species", "materials"])
+            errs = validate_csv_schema(coerce_flies_columns(raw_flies.copy()), ["fly_name", "type", "species", "materials"], "flies.csv")
             for e in errs:
                 st.warning(e)
             flies_df = build_flies_df(raw_flies)
@@ -922,150 +912,173 @@ elk hair,LOW,Nature's Spirit,
         st.markdown("Using bundled **data/flies.csv**")
         flies_df = load_flies_local("data/flies.csv")
 
-    # ---- 2) Substitutions (Optional)
-    # ---- 2) Substitutions (Local)
+# =============================
+# 2) Substitutions & Aliases (Local bundled)
+# =============================
 st.header("2) Substitutions")
 subs_map = load_subs_local()
 
-# ---- 2a) Aliases (Local)  
 st.header("2a) Aliases")
 aliases_map = load_aliases_local()
 
-    # ---- 3) Inventory input
-    st.header("3) Inventory")
-    method = st.radio("How will you provide inventory?", ["Upload CSV", "Paste text", "Use bundled sample"])
-    inv_tokens_from_step3 = set()
-    inv_full_df_from_step3 = None
-    if method == "Upload CSV":
-        inv_file = st.file_uploader("Upload inventory.csv (columns: material[, status][, brand][, model])", type=["csv"], key="inv_csv")
-        if inv_file is not None:
-            try:
-                inv_df = safe_read_csv(io.BytesIO(inv_file.getvalue()), required_cols=["material"])
-                errs = validate_csv_schema(inv_df, ["material"], "inventory.csv")
-                for e in errs:
-                    st.warning(e)
-            except Exception as e:
-                st.error(f"inventory.csv could not be parsed: {e}")
-                inv_df = None
-            if inv_df is not None:
-                inv_full_df_from_step3 = inv_df.copy()
-                mat_col = "material" if "material" in inv_df.columns else inv_df.columns[0]
-                status_col = "status" if "status" in inv_df.columns else None
-                if status_col:
-                    inv_df[status_col] = inv_df[status_col].fillna("").str.upper()
-                    present_mask = inv_df[status_col] != "OUT"
-                    inv_present = inv_df[present_mask]
-                else:
-                    inv_present = inv_df
-                inv_tokens_from_step3 = set(inv_present[mat_col].dropna().map(normalize).tolist())
-    elif method == "Paste text":
-        inv_text = st.text_area(
-            "One material per line. Optional: append ',STATUS,BRAND,MODEL' to a line.",
-            height=200,
-            placeholder="elk hair\nthread: 8/0 brown,HALF,UNI,\nhook: nymph #16,NEW,Tiemco,TMC 2488"
-        )
-        inv_lines = [line for line in inv_text.splitlines() if line.strip()]
-        if st.button("Use pasted inventory"):
-            for line in inv_lines:
-                material = line.split(",")[0].strip()
-                if material:
-                    inv_tokens_from_step3.add(normalize(material))
-            st.success("Inventory parsed from pasted text.")
+# =============================
+# 3) Inventory input
+# =============================
+st.header("3) Inventory")
+method = st.radio("How will you provide inventory?", ["Upload CSV", "Paste text", "Use bundled sample"])
+inv_tokens_from_step3 = set()
+inv_full_df_from_step3 = None
+if method == "Upload CSV":
+    inv_file = st.file_uploader(
+        "Upload inventory.csv (columns: material[, status][, brand][, model])", type=["csv"], key="inv_csv"
+    )
+    if inv_file is not None:
+        try:
+            inv_df = safe_read_csv(io.BytesIO(inv_file.getvalue()), required_cols=["material"])
+            errs = validate_csv_schema(inv_df, ["material"], "inventory.csv")
+            for e in errs:
+                st.warning(e)
+        except Exception as e:
+            st.error(f"inventory.csv could not be parsed: {e}")
+            inv_df = None
+        if inv_df is not None:
+            inv_full_df_from_step3 = inv_df.copy()
+            mat_col = "material" if "material" in inv_df.columns else inv_df.columns[0]
+            status_col = "status" if "status" in inv_df.columns else None
+            if status_col:
+                inv_df[status_col] = inv_df[status_col].fillna("").str.upper()
+                present_mask = inv_df[status_col] != "OUT"
+                inv_present = inv_df[present_mask]
+            else:
+                inv_present = inv_df
+            inv_tokens_from_step3 = set(inv_present[mat_col].dropna().map(normalize).tolist())
+elif method == "Paste text":
+    inv_text = st.text_area(
+        "One material per line. Optional: append ',STATUS,BRAND,MODEL' to a line.",
+        height=200,
+        placeholder="elk hair\nthread: 8/0 brown,HALF,UNI,\nhook: nymph #16,NEW,Tiemco,TMC 2488",
+    )
+    inv_lines = [line for line in inv_text.splitlines() if line.strip()]
+    if st.button("Use pasted inventory"):
+        for line in inv_lines:
+            material = line.split(",")[0].strip()
+            if material:
+                inv_tokens_from_step3.add(normalize(material))
+        st.success("Inventory parsed from pasted text.")
+else:
+    try:
+        sample_inv = read_csv_from_github("data/inventory.csv")
+    except Exception:
+        sample_inv = pd.read_csv("data/inventory.csv", encoding="utf-8", engine="python")
+    inv_full_df_from_step3 = sample_inv.copy()
+    if "status" in sample_inv.columns:
+        present_mask = sample_inv["status"].astype(str).str.upper().ne("OUT")
     else:
-        try:
-            sample_inv = read_csv_from_github("data/inventory.csv")
-        except Exception:
-            sample_inv = pd.read_csv("data/inventory.csv", encoding="utf-8", engine="python")
-        inv_full_df_from_step3 = sample_inv.copy()
-        present_mask = sample_inv.get('status','').astype(str).str.upper().ne('OUT')
-        inv_tokens_from_step3 = set(sample_inv[present_mask]["material"].dropna().map(normalize).tolist())
-        st.markdown("Using bundled **data/inventory.csv**.")
+        present_mask = pd.Series(True, index=sample_inv.index)
+
+    inv_tokens_from_step3 = set(sample_inv[present_mask]["material"].dropna().map(normalize).tolist())
+    st.markdown("Using bundled **data/inventory.csv**.")
 
 # =============================
-# Main options
+# 4) Matching Options
 # =============================
-    st.header("4) Matching Options")
-    use_subs = st.checkbox("Use substitutions", value=st.session_state.get("pref_use_subs", True), key="pref_use_subs")
-    ignore_labels = st.checkbox("Ignore part labels (looser matching)", value=st.session_state.get("pref_ignore_labels", True), key="pref_ignore_labels")
-    ignore_color = st.checkbox("Ignore color variations (match by color family)", value=st.session_state.get("pref_ignore_color", True), key="pref_ignore_color")
+st.header("4) Matching Options")
+use_subs = st.checkbox("Use substitutions", value=st.session_state.get("pref_use_subs", True), key="pref_use_subs")
+ignore_labels = st.checkbox(
+    "Ignore part labels (looser matching)", value=st.session_state.get("pref_ignore_labels", True), key="pref_ignore_labels"
+)
+ignore_color = st.checkbox(
+    "Ignore color variations (match by color family)", value=st.session_state.get("pref_ignore_color", True), key="pref_ignore_color"
+)
 
-    st.markdown("---")
-    st.header("Hooks Matching")
-    size_tol = st.slider("Hook size tolerance (higher = looser)", 0, 8, st.session_state.get("pref_size_tol", 2), key="pref_size_tol")
-    require_len = st.checkbox("Require length tag match (e.g., 3xl)", value=st.session_state.get("pref_require_len", False), key="pref_require_len")
+st.markdown("---")
+st.header("Hooks Matching")
+size_tol = st.slider("Hook size tolerance (higher = looser)", 0, 8, st.session_state.get("pref_size_tol", 2), key="pref_size_tol")
+require_len = st.checkbox("Require length tag match (e.g., 3xl)", value=st.session_state.get("pref_require_len", False), key="pref_require_len")
 
-    st.header("Brand & Model Preferences")
-    brand_aliases_file = st.file_uploader("Upload brands_aliases.csv (alias,brand)", type=["csv"], key="brand_aliases_csv")
+st.header("Brand & Model Preferences")
+brand_aliases_file = st.file_uploader("Upload brands_aliases.csv (alias,brand)", type=["csv"], key="brand_aliases_csv")
 
-    def _load_brand_aliases_default():
+def _load_brand_aliases_default():
+    try:
+        df = read_csv_from_github("data/brands_aliases.csv")
+    except Exception:
         try:
-            df = read_csv_from_github("data/brands_aliases.csv")
+            df = read_csv_from_github("data/brand_aliases.csv")
         except Exception:
-            try:
-                df = read_csv_from_github("data/brand_aliases.csv")
-            except Exception:
-                return {}
-        m = {}
-        for _, row in df.iterrows():
-            a = normalize(row.get("alias",""))
-            b = row.get("brand","")
-            if a and b: m[a] = b
-        return m
+            return {}
+    m = {}
+    for _, row in df.iterrows():
+        a = normalize(row.get("alias", ""))
+        b = row.get("brand", "")
+        if a and b:
+            m[a] = b
+    return m
 
-    brand_aliases = (
-        load_brand_aliases(brand_aliases_file) if brand_aliases_file is not None else _load_brand_aliases_default()
-    )
+brand_aliases = load_brand_aliases(brand_aliases_file) if brand_aliases_file is not None else _load_brand_aliases_default()
 
-    hooks_catalog_file = st.file_uploader("Upload hooks_catalog.csv (brand,model,family,length_tag,wire,eye,barbless,notes)", type=["csv"], key="hooks_catalog_csv")
-    hooks_catalog = (
-        load_hooks_catalog(hooks_catalog_file) if hooks_catalog_file is not None else load_hooks_catalog("data/hooks_catalog.csv")
-    )
+hooks_catalog_file = st.file_uploader(
+    "Upload hooks_catalog.csv (brand,model,family,length_tag,wire,eye,barbless,notes)", type=["csv"], key="hooks_catalog_csv"
+)
+hooks_catalog = load_hooks_catalog(hooks_catalog_file) if hooks_catalog_file is not None else load_hooks_catalog("data/hooks_catalog.csv")
 
-    brand_prefs_file = st.file_uploader("Upload brand_prefs.csv (category,preferred_brands)", type=["csv"], key="brand_prefs_csv")
-    brand_prefs = (
-        load_brand_prefs(brand_prefs_file) if brand_prefs_file is not None else load_brand_prefs("data/brand_prefs.csv")
-    )
+brand_prefs_file = st.file_uploader(
+    "Upload brand_prefs.csv (category,preferred_brands)", type=["csv"], key="brand_prefs_csv"
+)
+brand_prefs = load_brand_prefs(brand_prefs_file) if brand_prefs_file is not None else load_brand_prefs("data/brand_prefs.csv")
 
-    prefer_brands = st.checkbox("Prefer my brands/models in recommendations", value=st.session_state.get("pref_prefer_brands", True), key="pref_prefer_brands")
+prefer_brands = st.checkbox(
+    "Prefer my brands/models in recommendations", value=st.session_state.get("pref_prefer_brands", True), key="pref_prefer_brands"
+)
 
-    # If user uploaded brand aliases, refresh the in-app auto-detection map immediately
-    if brand_aliases_file is not None:
-        KNOWN_BRANDS_ALIASES.clear()
-        KNOWN_BRANDS_ALIASES.update({normalize(k): v for k, v in brand_aliases.items()})
-        passthrough = set([normalize(b) for b in (hooks_catalog["brand"].dropna().unique().tolist() if not hooks_catalog.empty else [])])
-        passthrough.update(["wapsi", "hareline", "uni", "veevus", "utc", "semperfli"])
-        for b in passthrough:
-            if b and b not in KNOWN_BRANDS_ALIASES:
-                KNOWN_BRANDS_ALIASES[b] = b.title()
+# If user uploaded brand aliases, refresh the in-app auto-detection map immediately
+if brand_aliases_file is not None:
+    KNOWN_BRANDS_ALIASES.clear()
+    KNOWN_BRANDS_ALIASES.update({normalize(k): v for k, v in brand_aliases.items()})
+    passthrough = set([normalize(b) for b in (hooks_catalog["brand"].dropna().unique().tolist() if not hooks_catalog.empty else [])])
+    passthrough.update(["wapsi", "hareline", "uni", "veevus", "utc", "semperfli"])
+    for b in passthrough:
+        if b and b not in KNOWN_BRANDS_ALIASES:
+            KNOWN_BRANDS_ALIASES[b] = b.title()
 
 # =============================
 # Status panel
 # =============================
-    st.markdown("---")
+st.markdown("---")
 st.subheader("Status")
+
 try:
-    _flies_rows = int(flies_df.shape[0]) if 'flies_df' in locals() else 0
+    _flies_rows = int(flies_df.shape[0]) if "flies_df" in locals() else 0
     st.write(f"**flies_df**: {_flies_rows} rows loaded")
 except Exception as e:
     st.error(f"flies_df not ready: {e}")
-_subs_len = len(subs_map) if 'subs_map' in locals() and subs_map else 0
-_aliases_len = len(aliases_map) if 'aliases_map' in locals() and aliases_map else 0
+
+_subs_len = len(subs_map) if "subs_map" in locals() and subs_map else 0
+_aliases_len = len(aliases_map) if "aliases_map" in locals() and aliases_map else 0
 st.write(f"**substitutions**: {_subs_len} rules | **aliases**: {_aliases_len} entries")
-_inv_count = len(inv_tokens_from_step3) if 'inv_tokens_from_step3' in locals() else 0
+_inv_count = len(inv_tokens_from_step3) if "inv_tokens_from_step3" in locals() else 0
 st.write(f"**inventory materials present (Step 3)**: {_inv_count}")
 
-# Load color/hook maps (bundled, prefer GitHub if configured    )
+# Load color/hook maps (bundled, prefer GitHub if configured)
 try:
     df_c = read_csv_from_github("data/color_families.csv")
 except Exception:
     df_c = pd.read_csv("data/color_families.csv", encoding="utf-8", engine="python")
-color_map = {normalize(r.get("color","")): normalize(r.get("family","")) for _, r in df_c.iterrows() if normalize(r.get("color","")) and normalize(r.get("family",""))}
+color_map = {
+    normalize(r.get("color", "")): normalize(r.get("family", ""))
+    for _, r in df_c.iterrows()
+    if normalize(r.get("color", "")) and normalize(r.get("family", ""))
+}
 
 try:
     df_h = read_csv_from_github("data/hooks_map.csv")
 except Exception:
     df_h = pd.read_csv("data/hooks_map.csv", encoding="utf-8", engine="python")
-hook_map = {normalize(r.get("keyword","")): normalize(r.get("family","")) for _, r in df_h.iterrows() if normalize(r.get("keyword","")) and normalize(r.get("family",""))}
+hook_map = {
+    normalize(r.get("keyword", "")): normalize(r.get("family", ""))
+    for _, r in df_h.iterrows()
+    if normalize(r.get("keyword", "")) and normalize(r.get("family", ""))
+}
 
 # =============================
 # In-app Inventory Editor (session state)
@@ -1089,11 +1102,11 @@ edited_df = st.data_editor(
     use_container_width=True,
     column_config={
         "material": st.column_config.TextColumn("Material Name", required=True),
-        "status": st.column_config.SelectboxColumn("Status", options=["NEW","HALF","LOW","OUT",""], required=True),
+        "status": st.column_config.SelectboxColumn("Status", options=["NEW", "HALF", "LOW", "OUT", ""], required=True),
         "brand": st.column_config.TextColumn("Brand"),
         "model": st.column_config.TextColumn("Model / Size"),
     },
-    key="inventory_editor_main"
+    key="inventory_editor_main",
 )
 
 if st.button("↩️ Reset editor to bundled sample"):
@@ -1103,7 +1116,9 @@ if st.button("↩️ Reset editor to bundled sample"):
         for col in expected:
             if col not in sample_inv.columns:
                 sample_inv[col] = ""
-        st.session_state.inventory_df = sample_inv[expected].fillna("").drop_duplicates().reset_index(drop=True)
+        st.session_state.inventory_df = (
+            sample_inv[expected].fillna("").drop_duplicates().reset_index(drop=True)
+        )
         st.toast("Inventory editor reset to bundled sample.", icon="♻️")
         st.rerun()
     except Exception as e:
@@ -1121,7 +1136,11 @@ st.header("Tutorials & Recipe Builder")
 st.write("Associate tutorials with recipes, or add new recipes from a tutorial.")
 
 with st.expander("➕ Add a tutorial link to an existing recipe"):
-    sel = st.selectbox("Choose a recipe", locals().get("flies_df", pd.DataFrame({"fly_name":[]}))["fly_name"].tolist() if "flies_df" in locals() else [], key="add_tut_sel")
+    sel = st.selectbox(
+        "Choose a recipe",
+        locals().get("flies_df", pd.DataFrame({"fly_name": []}))["fly_name"].tolist() if "flies_df" in locals() else [],
+        key="add_tut_sel",
+    )
     new_url = st.text_input("Tutorial URL (YouTube, blog, etc.)", placeholder="https://...", key="add_tut_url")
     add_btn = st.button("Add tutorial to recipe")
     if add_btn and new_url.strip() and "flies_df" in locals() and not locals()["flies_df"].empty:
@@ -1154,11 +1173,13 @@ with st.expander("🆕 Create a new recipe from a tutorial"):
             "type": nr_type.strip(),
             "species": ";".join([normalize(s) for s in nr_species.split(";") if s.strip()]),
             "materials": materials_joined,
-            "tutorials": nr_url.strip() if nr_url.strip() else ""
+            "tutorials": nr_url.strip() if nr_url.strip() else "",
         }
         flies_df = locals()["flies_df"]
         flies_df.loc[len(flies_df)] = row
-        st.success(f"Added new recipe '{nr_name}'. It will be included immediately in matching. Use the download button below to save updated flies.csv.")
+        st.success(
+            f"Added new recipe '{nr_name}'. It will be included immediately in matching. Use the download button below to save updated flies.csv."
+        )
 
 # =============================
 # Cloud sync: Account + prefs (only if DB configured)
@@ -1167,7 +1188,6 @@ def _current_doc_id():
     uid = st.session_state.get("firebase_uid", "").strip()
     if uid:
         return uid
-    # Legacy fallback: your existing text field
     return st.session_state.get("account_id", "").strip().lower()
 
 qp = st.query_params
@@ -1199,17 +1219,17 @@ acct_id_prefs = st.text_input(
     "Account ID for preferences (use the same as Cloud sync above)",
     key="account_id_prefs",
     value=st.session_state.get("account_id", ""),
-    placeholder="you@example.com"
+    placeholder="you@example.com",
 )
 
-# Firestore helpers
 def save_user_inventory(user_id: str, inv_df: pd.DataFrame) -> bool:
     if DB is None:
         return False
     try:
         doc_id = _effective_user_doc_id(user_id)
-        DB.collection("users").document(doc_id).collection("app").document("inventory") \
-          .set({"rows": inv_df.to_dict(orient="records")}, merge=True)
+        DB.collection("users").document(doc_id).collection("app").document("inventory").set(
+            {"rows": inv_df.to_dict(orient="records")}, merge=True
+        )
         return True
     except Exception as e:
         st.error(f"Failed to save inventory: {e}")
@@ -1270,7 +1290,14 @@ with cP2:
         if not prefs:
             st.warning("No preferences found for this account.")
         else:
-            for k in ["pref_use_subs","pref_ignore_labels","pref_ignore_color","pref_size_tol","pref_require_len","pref_prefer_brands"]:
+            for k in [
+                "pref_use_subs",
+                "pref_ignore_labels",
+                "pref_ignore_color",
+                "pref_size_tol",
+                "pref_require_len",
+                "pref_prefer_brands",
+            ]:
                 if k in prefs:
                     st.session_state[k] = prefs[k]
             if "aliases_map" in prefs and isinstance(prefs["aliases_map"], dict):
@@ -1301,14 +1328,21 @@ with st.expander("📦 Export / Import preferences (JSON)"):
         data=json.dumps(cur_prefs, indent=2).encode("utf-8"),
         file_name="preferences.json",
         mime="application/json",
-        help="Download your current preferences"
+        help="Download your current preferences",
     )
 
     prefs_json_upload = st.file_uploader("Import preferences.json", type=["json"], key="prefs_json_upload")
     if prefs_json_upload is not None:
         try:
             imported = json.loads(prefs_json_upload.getvalue().decode("utf-8"))
-            for k in ["pref_use_subs","pref_ignore_labels","pref_ignore_color","pref_size_tol","pref_require_len","pref_prefer_brands"]:
+            for k in [
+                "pref_use_subs",
+                "pref_ignore_labels",
+                "pref_ignore_color",
+                "pref_size_tol",
+                "pref_require_len",
+                "pref_prefer_brands",
+            ]:
                 if k in imported:
                     st.session_state[k] = imported[k]
             if "aliases_map" in imported and isinstance(imported["aliases_map"], dict):
@@ -1346,48 +1380,59 @@ with cB:
             st.success("Loaded inventory from the cloud.")
             st.rerun()
 
-# Find this section around line 1335 in your app.py and replace it:
-
-# BEFORE (causing error):
+# --- Auto-load inventory & prefs once per session (after inputs are visible)
 if DB is not None and st.session_state.get("account_id") and not st.session_state.get("did_auto_load"):
+    try:
+        df_cloud = load_user_inventory(st.session_state["account_id"])
+        if isinstance(df_cloud, pd.DataFrame) and not df_cloud.empty:
+            expected = ["material", "status", "brand", "model"]
+            for col in expected:
+                if col not in df_cloud.columns:
+                    df_cloud[col] = ""
+            st.session_state.inventory_df = (
+                df_cloud[expected].fillna("").drop_duplicates().reset_index(drop=True)
+            )
 
-# AFTER (fixed):
-    if DB is not None and st.session_state.get("account_id") and not st.session_state.get("did_auto_load"):
-        try:
-            df_cloud = load_user_inventory(st.session_state["account_id"])
-            if isinstance(df_cloud, pd.DataFrame) and not df_cloud.empty:
-                expected = ["material", "status", "brand", "model"]
-                for col in expected:
-                    if col not in df_cloud.columns:
-                        df_cloud[col] = ""
-                st.session_state.inventory_df = df_cloud[expected].fillna("").drop_duplicates().reset_index(drop=True)
+        prefs = load_user_prefs(st.session_state["account_id"])
+        if prefs:
+            for k in [
+                "pref_use_subs",
+                "pref_ignore_labels",
+                "pref_ignore_color",
+                "pref_size_tol",
+                "pref_require_len",
+                "pref_prefer_brands",
+            ]:
+                if k in prefs:
+                    st.session_state[k] = prefs[k]
+            if "aliases_map" in prefs and isinstance(prefs["aliases_map"], dict):
+                aliases_map.update({str(k): str(v) for k, v in prefs["aliases_map"].items()})
+            if "subs_map" in prefs and isinstance(prefs["subs_map"], dict):
+                subs_map.clear()
+                for b, eqs in prefs["subs_map"].items():
+                    subs_map[str(b)] = set(str(e) for e in (eqs or []))
+            if "brand_prefs" in prefs and isinstance(prefs["brand_prefs"], dict):
+                brand_prefs.update(prefs["brand_prefs"])
 
-            prefs = load_user_prefs(st.session_state["account_id"])
-            if prefs:
-                for k in ["pref_use_subs","pref_ignore_labels","pref_ignore_color","pref_size_tol","pref_require_len","pref_prefer_brands"]:
-                    if k in prefs:
-                        st.session_state[k] = prefs[k]
-                if "aliases_map" in prefs and isinstance(prefs["aliases_map"], dict):
-                    aliases_map.update({str(k): str(v) for k, v in prefs["aliases_map"].items()})
-                if "subs_map" in prefs and isinstance(prefs["subs_map"], dict):
-                    subs_map.clear()
-                    for b, eqs in prefs["subs_map"].items():
-                        subs_map[str(b)] = set(str(e) for e in (eqs or []))
-                if "brand_prefs" in prefs and isinstance(prefs["brand_prefs"], dict):
-                    brand_prefs.update(prefs["brand_prefs"])
+        st.session_state["did_auto_load"] = True
+        st.rerun()
+    except Exception as e:
+        st.warning(f"Auto-load failed: {e}")
 
-            st.session_state["did_auto_load"] = True
-            st.rerun()
-        except Exception as e:
-            st.warning(f"Auto-load failed: {e}")
+# =============================
+# Inventory Source for Matching (RESTORED)
+# =============================
 st.header("Inventory Source for Matching")
 inv_source = st.radio(
     "Choose which inventory to use when matching:",
     ["Step 3 upload/paste/sample", "Inventory Editor (session)", "Merge both"],
     index=0,
-    help="The editor lets you manage inventory inline. Merge = union of both sources (excluding items with status OUT)."
+    help="The editor lets you manage inventory inline. Merge = union of both sources (excluding items with status OUT).",
 )
 
+# =============================
+# Run matching
+# =============================
 run_now = st.button("▶️ Run matching")
 if st.session_state.get("quickstart_run"):
     run_now = True
@@ -1410,9 +1455,9 @@ require_len = locals().get("require_len", False)
 
 # Build inventory tokens
 inv_tokens_step3 = locals().get("inv_tokens_from_step3", set())
-inv_editor_df = st.session_state.get("inventory_df", pd.DataFrame(columns=["material","status","brand","model"]))
+inv_editor_df = st.session_state.get("inventory_df", pd.DataFrame(columns=["material", "status", "brand", "model"]))
 if not inv_editor_df.empty:
-    present_mask_editor = inv_editor_df.get("status","").astype(str).str.upper().ne("OUT")
+    present_mask_editor = inv_editor_df.get("status", "").astype(str).str.upper().ne("OUT")
     inv_tokens_editor = set(inv_editor_df.loc[present_mask_editor, "material"].dropna().map(normalize).tolist())
 else:
     inv_tokens_editor = set()
@@ -1436,7 +1481,7 @@ matches_df = compute_matches(
     color_map=color_map,
     hook_map=hook_map,
     size_tolerance=size_tol,
-    require_length_match=require_len
+    require_length_match=require_len,
 )
 
 # Attach first tutorial link
@@ -1463,12 +1508,14 @@ with col2:
 with col3:
     show_cols = st.multiselect(
         "Columns to show",
-        ["fly_name","type","species","required_count","missing_count","missing","tutorial"],
-        default=["fly_name","type","species","required_count","missing_count","missing","tutorial"]
+        ["fly_name", "type", "species", "required_count", "missing_count", "missing", "tutorial"],
+        default=["fly_name", "type", "species", "required_count", "missing_count", "missing", "tutorial"],
     )
 
 fly_query = st.text_input("🔎 Search by fly name", "", placeholder="e.g. elk hair, pheasant tail, zonker...")
-near_miss_cap = st.slider("Near-miss threshold (≤ this many missing)", 2, 6, 3, help="Show and aggregate flies that are within this many missing materials.")
+near_miss_cap = st.slider(
+    "Near-miss threshold (≤ this many missing)", 2, 6, 3, help="Show and aggregate flies that are within this many missing materials."
+)
 
 def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     mask_type = df["type"].isin(type_filter)
@@ -1481,15 +1528,9 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 # Tabs
-tab1, tab2, tab3, tabN, tab4, tab5, tabW = st.tabs([
-    "✅ Can tie now",
-    "🟡 Missing 1",
-    "🟠 Missing 2",
-    f"🟣 Near misses (≤{near_miss_cap})",
-    "🛒 Best buys",
-    "📦 Inventory status & brands",
-    "🧪 What-if"
-])
+tab1, tab2, tab3, tabN, tab4, tab5, tabW = st.tabs(
+    ["✅ Can tie now", "🟡 Missing 1", "🟠 Missing 2", f"🟣 Near misses (≤{near_miss_cap})", "🛒 Best buys", "📦 Inventory status & brands", "🧪 What-if"]
+)
 
 with tab1:
     df = apply_filters(matches_df[matches_df["missing_count"] == 0])
@@ -1511,7 +1552,7 @@ with tab2:
         def add_items_to_editor(items: list[str]) -> int:
             if not items:
                 return 0
-            base = st.session_state.get("inventory_df", pd.DataFrame(columns=["material","status","brand","model"]))
+            base = st.session_state.get("inventory_df", pd.DataFrame(columns=["material", "status", "brand", "model"]))
             base = base.copy()
             new_rows = []
             for raw in items:
@@ -1524,12 +1565,11 @@ with tab2:
                 new_rows.append({"material": mat, "status": "NEW", "brand": brand, "model": model})
             if new_rows:
                 st.session_state.inventory_df = (
-                    pd.concat([base, pd.DataFrame(new_rows)], ignore_index=True)
-                      .drop_duplicates()
-                      .reset_index(drop=True)
+                    pd.concat([base, pd.DataFrame(new_rows)], ignore_index=True).drop_duplicates().reset_index(drop=True)
                 )
                 return len(new_rows)
             return 0
+
         added = add_items_to_editor(sel_add_1)
         st.success(f"Added {added} item(s) to the editor.")
 
@@ -1547,7 +1587,7 @@ with tab3:
         def add_items_to_editor(items: list[str]) -> int:
             if not items:
                 return 0
-            base = st.session_state.get("inventory_df", pd.DataFrame(columns=["material","status","brand","model"]))
+            base = st.session_state.get("inventory_df", pd.DataFrame(columns=["material", "status", "brand", "model"]))
             base = base.copy()
             new_rows = []
             for raw in items:
@@ -1560,12 +1600,11 @@ with tab3:
                 new_rows.append({"material": mat, "status": "NEW", "brand": brand, "model": model})
             if new_rows:
                 st.session_state.inventory_df = (
-                    pd.concat([base, pd.DataFrame(new_rows)], ignore_index=True)
-                      .drop_duplicates()
-                      .reset_index(drop=True)
+                    pd.concat([base, pd.DataFrame(new_rows)], ignore_index=True).drop_duplicates().reset_index(drop=True)
                 )
                 return len(new_rows)
             return 0
+
         added = add_items_to_editor(sel_add_2)
         st.success(f"Added {added} item(s) to the editor.")
 
@@ -1585,10 +1624,11 @@ with tab4:
         df_bp = read_csv_from_github("data/brand_prefs.csv")
         brand_prefs = {}
         for _, row in df_bp.iterrows():
-            cat = normalize(row.get("category",""))
-            prefs = row.get("preferred_brands","")
+            cat = normalize(row.get("category", ""))
+            prefs = row.get("preferred_brands", "")
             arr = [p.strip() for p in str(prefs).split(";") if str(p).strip()]
-            if cat: brand_prefs[cat] = arr
+            if cat:
+                brand_prefs[cat] = arr
     except Exception:
         brand_prefs = {}
 
@@ -1605,7 +1645,7 @@ with tab4:
             "⬇️ Download top singles (enriched)",
             singles.to_csv(index=False).encode("utf-8"),
             file_name="best_single_buys_enriched.csv",
-            mime="text/csv"
+            mime="text/csv",
         )
     with c5:
         st.markdown("**Top two-item combos (buy both to unlock):**")
@@ -1616,7 +1656,7 @@ with tab4:
             "⬇️ Download top pairs",
             pairs.to_csv(index=False).encode("utf-8"),
             file_name="best_pair_buys.csv",
-            mime="text/csv"
+            mime="text/csv",
         )
 
     shopping_df = make_shopping_list(matches_df, max_missing=near_miss_cap)
@@ -1625,14 +1665,14 @@ with tab4:
         "⬇️ Download shopping list (enriched CSV)",
         shopping_df.to_csv(index=False).encode("utf-8"),
         file_name="shopping_list_enriched.csv",
-        mime="text/csv"
+        mime="text/csv",
     )
 
     if not shopping_df.empty:
         lines = []
         for _, r in shopping_df.iterrows():
             line = f"- {r.get('material','')}"
-            if prefer_brands and str(r.get('suggested_brand','')).strip():
+            if prefer_brands and str(r.get("suggested_brand", "")).strip():
                 bm = f"{r.get('suggested_brand','')} {r.get('suggested_model','')}".strip()
                 if bm:
                     line += f" — {bm}"
@@ -1647,24 +1687,25 @@ with tab4:
               📋 Copy shopping list
             </button>
             """,
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
 
 with tab5:
     st.markdown("**Inventory from Step 3 (upload/paste/sample):**")
     inv_full_df_from_step3 = locals().get("inv_full_df_from_step3", None)
+
     def status_badge(s: str) -> str:
         m = str(s).upper()
-        return {"NEW":"🆕 New", "HALF":"🌓 Half", "LOW":"🪫 Low", "OUT":"⛔️ Out", "":""}.get(m, m)
+        return {"NEW": "🆕 New", "HALF": "🌓 Half", "LOW": "🪫 Low", "OUT": "⛔️ Out", "": ""}.get(m, m)
 
     if inv_full_df_from_step3 is not None:
         disp = inv_full_df_from_step3.copy()
-        if 'status' in disp.columns:
-            disp['status_badge'] = disp['status'].apply(status_badge)
-            cols = ['status_badge'] + [c for c in ['material','brand','model','status'] if c in disp.columns]
+        if "status" in disp.columns:
+            disp["status_badge"] = disp["status"].apply(status_badge)
+            cols = ["status_badge"] + [c for c in ["material", "brand", "model", "status"] if c in disp.columns]
             st.dataframe(disp[cols], use_container_width=True)
-            counts = disp['status'].fillna('').str.upper().value_counts().reset_index()
-            counts.columns = ['status','count']
+            counts = disp["status"].fillna("").str.upper().value_counts().reset_index()
+            counts.columns = ["status", "count"]
             st.markdown("**Counts by status:**")
             st.dataframe(counts, use_container_width=True)
         else:
@@ -1674,10 +1715,16 @@ with tab5:
 
     with st.expander("⚠️ Inventory QA (possible typos / unknown materials)"):
         inv_tokens_step3 = locals().get("inv_tokens_from_step3", set())
-        inv_tokens_editor = set(st.session_state.inventory_df["material"].dropna().map(normalize).tolist()) if not st.session_state.inventory_df.empty else set()
+        inv_tokens_editor = (
+            set(st.session_state.inventory_df["material"].dropna().map(normalize).tolist())
+            if not st.session_state.inventory_df.empty
+            else set()
+        )
         inv_all_tokens = inv_tokens_step3.union(inv_tokens_editor)
 
-        def derive_known_material_tokens(flies_df: pd.DataFrame, aliases_map: dict[str,str], subs_map: dict[str,set[str]]|None) -> set[str]:
+        def derive_known_material_tokens(
+            flies_df: pd.DataFrame, aliases_map: dict[str, str], subs_map: dict[str, set[str]] | None
+        ) -> set[str]:
             known = set()
             for lst in flies_df["materials_list"]:
                 known.update(map_aliases_list(lst, aliases_map))
@@ -1707,8 +1754,14 @@ with tabW:
     st.markdown("Try adding prospective buys to your inventory and preview what unlocks.")
     base_shop_df = make_shopping_list(matches_df, max_missing=near_miss_cap)
     base_items = base_shop_df["material"].tolist() if not base_shop_df.empty else []
-    pick = st.multiselect("Select items to hypothetically add", base_items, help="Start with the shopping list; you can also type free-form entries below.")
-    extra_freeform = st.text_area("Optional free-form additions (one per line)", height=100, placeholder="hook: nymph #16\ndry dubbing olive\nkrystal flash pearl")
+    pick = st.multiselect(
+        "Select items to hypothetically add",
+        base_items,
+        help="Start with the shopping list; you can also type free-form entries below.",
+    )
+    extra_freeform = st.text_area(
+        "Optional free-form additions (one per line)", height=100, placeholder="hook: nymph #16\ndry dubbing olive\nkrystal flash pearl"
+    )
     extra_tokens = [normalize(x) for x in extra_freeform.splitlines() if x.strip()]
 
     simulate_btn = st.button("Run what-if simulation")
@@ -1725,7 +1778,7 @@ with tabW:
             color_map=color_map,
             hook_map=hook_map,
             size_tolerance=size_tol,
-            require_length_match=require_len
+            require_length_match=require_len,
         )
         cA, cB, cC = st.columns(3)
         cA.metric("✅ Can tie now (what-if)", int((matches_sim["missing_count"] == 0).sum()))
@@ -1733,12 +1786,12 @@ with tabW:
         cC.metric("🟠 Missing 2 (what-if)", int((matches_sim["missing_count"] == 2).sum()))
         unlocked = matches_sim[(matches_sim["missing_count"] == 0) & (matches_df["missing_count"] > 0)]
         st.markdown("**Newly unlocked patterns (vs. current):**")
-        st.dataframe(unlocked[["fly_name","type","species"]].sort_values(["type","fly_name"]), use_container_width=True)
+        st.dataframe(unlocked[["fly_name", "type", "species"]].sort_values(["type", "fly_name"]), use_container_width=True)
         st.download_button(
             "⬇️ Download what-if unlocked list (CSV)",
-            unlocked[["fly_name","type","species"]].to_csv(index=False).encode("utf-8"),
+            unlocked[["fly_name", "type", "species"]].to_csv(index=False).encode("utf-8"),
             file_name="what_if_unlocked.csv",
-            mime="text/csv"
+            mime="text/csv",
         )
 
 # =============================
@@ -1752,7 +1805,9 @@ if st.button("Build ZIP bundle"):
     brand_prefs = load_brand_prefs("data/brand_prefs.csv")
     singles_all = enrich_buy_suggestions(best_single_buys(matches_df), prefer_brands, hooks_catalog, brand_prefs, hook_map)
     pairs_all = best_pair_buys(matches_df)
-    shopping_all = enrich_buy_suggestions(make_shopping_list(matches_df, max_missing=near_miss_cap), prefer_brands, hooks_catalog, brand_prefs, hook_map)
+    shopping_all = enrich_buy_suggestions(
+        make_shopping_list(matches_df, max_missing=near_miss_cap), prefer_brands, hooks_catalog, brand_prefs, hook_map
+    )
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
@@ -1779,14 +1834,12 @@ if st.button("Build ZIP bundle"):
         z.writestr("options.json", pd.Series(opts, dtype=object).to_json())
 
     st.download_button(
-        "⬇️ Download ZIP bundle",
-        data=buf.getvalue(),
-        file_name="fly_tying_recommender_bundle.zip",
-        mime="application/zip"
+        "⬇️ Download ZIP bundle", data=buf.getvalue(), file_name="fly_tying_recommender_bundle.zip", mime="application/zip"
     )
 
 def log_event(name: str, payload: dict):
-    if DB is None: return
+    if DB is None:
+        return
     try:
         ev = {"name": name, "ts": pd.Timestamp.utcnow().isoformat(), **payload}
         DB.collection("events").add(ev)
@@ -1794,16 +1847,19 @@ def log_event(name: str, payload: dict):
         st.warning(f"Analytics not saved: {e}")
 
 # right after matches_df is computed and Summary metrics are calculated:
-log_event("run_matching", {
-    "acct": st.session_state.get("account_id",""),
-    "inventory_source": inv_source,
-    "inv_count": len(inv_tokens),
-    "can_tie": int((matches_df["missing_count"] == 0).sum()),
-    "miss1":  int((matches_df["missing_count"] == 1).sum()),
-    "miss2":  int((matches_df["missing_count"] == 2).sum()),
-    "size_tol": size_tol,
-    "ignore_labels": ignore_labels,
-    "ignore_color": ignore_color,
-    "prefer_brands": prefer_brands,
-    "src": st.query_params.get("src", "")
-})
+log_event(
+    "run_matching",
+    {
+        "acct": st.session_state.get("account_id", ""),
+        "inventory_source": inv_source,
+        "inv_count": len(inv_tokens),
+        "can_tie": int((matches_df["missing_count"] == 0).sum()),
+        "miss1": int((matches_df["missing_count"] == 1).sum()),
+        "miss2": int((matches_df["missing_count"] == 2).sum()),
+        "size_tol": size_tol,
+        "ignore_labels": ignore_labels,
+        "ignore_color": ignore_color,
+        "prefer_brands": prefer_brands,
+        "src": st.query_params.get("src", ""),
+    },
+)
