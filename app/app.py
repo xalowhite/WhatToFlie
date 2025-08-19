@@ -14,10 +14,13 @@ from urllib.error import URLError
 import requests
 import streamlit.components.v1 as components
 
-# Add this at the very top of your app, after imports
-st.write("DEBUG: Current URL params:", dict(st.query_params))
-st.write("DEBUG: Session state firebase_uid:", st.session_state.get("firebase_uid"))
-st.write("DEBUG: Token processed flag:", st.session_state.get("token_processed"))
+if "page_loads" not in st.session_state:
+    st.session_state["page_loads"] = 0
+st.session_state["page_loads"] += 1
+
+st.write(f"DEBUG: Page load count: {st.session_state['page_loads']}")
+st.write(f"DEBUG: Has token in URL: {'token' in st.query_params}")
+st.write(f"DEBUG: Already authenticated: {bool(st.session_state.get('firebase_uid'))}")
 
 # =============================
 # App meta (MUST BE FIRST)
@@ -125,34 +128,23 @@ def render_google_signout_button():
         st.rerun()
 
 # =============================
-# Authentication Processing
-# =============================
-# =============================
 # Authentication Processing (FIXED)
 # =============================
 def clean_url():
     """Clean URL params without causing redirect loops"""
-    # Don't use st.query_params.clear() as it can cause issues
-    # Instead, selectively remove auth params
-    current_params = dict(st.query_params)
-    auth_params = ["token", "uid", "email", "logout"]
-    
-    # Only clean if there are auth params to remove
-    if any(param in current_params for param in auth_params):
-        for key in auth_params:
-            current_params.pop(key, None)
-        
-        # Reset query params without the auth params
-        st.query_params.update(current_params)
+    # Simply clear the auth params without updating
+    if any(param in st.query_params for param in ["token", "uid", "email", "logout"]):
+        # Use a simple clear instead of update
+        st.query_params.clear()
 
 def get_firebase_user():
     """Process Firebase authentication token from URL"""
     if admin_auth is None:
         return None
     
-    # Check if we've already processed this token in this session
-    if st.session_state.get("token_processed"):
-        return None
+    # Check if we already have a user in session
+    if st.session_state.get("firebase_uid"):
+        return None  # Already authenticated
         
     token = st.query_params.get("token", "")
     if isinstance(token, list):
@@ -161,21 +153,18 @@ def get_firebase_user():
         return None
         
     try:
-        # Mark that we're processing this token
-        st.session_state["token_processed"] = True
-        
         decoded_token = admin_auth.verify_id_token(token)
         st.session_state["firebase_uid"] = decoded_token.get("uid", "")
         st.session_state["firebase_email"] = decoded_token.get("email", "")
         
         # Clean URL after successful authentication
+        # Don't use st.rerun() here
         clean_url()
         
-        # Don't call st.rerun() here - let the page load naturally
         return decoded_token
     except Exception as e:
         st.error(f"Authentication verification failed: {e}")
-        # Clean URL even on failure to prevent repeated attempts
+        # Clean URL even on failure
         clean_url()
         return None
 
@@ -184,19 +173,13 @@ def handle_logout():
     if st.query_params.get("logout"):
         st.session_state.pop("firebase_uid", None)
         st.session_state.pop("firebase_email", None)
-        st.session_state.pop("token_processed", None)  # Reset token processing flag
         clean_url()
         st.rerun()
 
-# Process authentication ONCE at app start
-# Reset the token_processed flag if there's a new token
-current_token = st.query_params.get("token", "")
-if current_token and not st.session_state.get("token_processed"):
-    st.session_state["token_processed"] = False
-
-# Process any pending authentication
+# Process authentication
 handle_logout()
 _ = get_firebase_user()
+
 
 # Display authentication status
 st.markdown("### 🔐 Authentication Status")
