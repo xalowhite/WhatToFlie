@@ -1407,28 +1407,6 @@ if DB is not None and st.session_state.get("account_id") and not st.session_stat
             st.rerun()
         except Exception as e:
             st.warning(f"Auto-load failed: {e}")
-
-# Also find and replace all other DB references with safety checks:
-
-# Replace this pattern:
-DB.collection("users")...
-
-# With this pattern:
-if DB is not None:
-    DB.collection("users")...
-else:
-    st.warning("Database not available")
-    return False  # or appropriate fallback
-
-# Allow downloading the current flies
-if "flies_df" in locals():
-    csv_bytes = locals()["flies_df"].to_csv(index=False).encode("utf-8")
-    st.download_button("⬇️ Download updated flies.csv", csv_bytes, file_name="flies.csv", mime="text/csv")
-
-# =============================
-# Inventory source selection & run
-# =============================
-st.markdown("---")
 st.header("Inventory Source for Matching")
 inv_source = st.radio(
     "Choose which inventory to use when matching:",
