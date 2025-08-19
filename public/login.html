@@ -3,14 +3,32 @@
   <head>
     <meta charset="utf-8" />
     <title>Sign in to WhatToFlie</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 24px; }
+      #google { padding: 10px 16px; background: #4285f4; color: #fff; border: 0; border-radius: 6px; cursor: pointer; }
+      #status { margin-top: 12px; color: #444; }
+      #errors { margin-top: 8px; color: #c0392b; white-space: pre-wrap; }
+    </style>
   </head>
   <body>
     <h2>Sign in</h2>
     <button id="google">Sign in with Google</button>
+    <div id="status">Ready.</div>
+    <div id="errors"></div>
 
     <script type="module">
       import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-      import { getAuth, GoogleAuthProvider, signInWithPopup } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+      import {
+        getAuth,
+        GoogleAuthProvider,
+        signInWithPopup,
+        signInWithRedirect,
+        getRedirectResult,
+      } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+
+      const urlParams = new URLSearchParams(window.location.search);
+      const isPopup = urlParams.get('popup') === 'true';
 
       const firebaseConfig = {
         apiKey: "AIzaSyA_dlivqpvqiYQVp0AC-yF1ZTkDSjIxVuE",
@@ -18,37 +36,82 @@
         projectId: "whattoflie",
       };
 
+      // Where to send the token after auth
+      // Default: your Streamlit Cloud app.
+      // You can override via ?return_to=<absolute URL>
+      const qs = new URLSearchParams(window.location.search);
+      const defaultReturnTo = "https://whattoflie.streamlit.app/";
+      const returnTo = qs.get("return_to") || defaultReturnTo;
+
       const app = initializeApp(firebaseConfig);
       const auth = getAuth(app);
+      const provider = new GoogleAuthProvider();
+          if (isPopup) {
+    // Send message to parent window
+    window.opener.postMessage({
+        type: 'auth_success',
+        token: token,
+        uid: result.user.uid,
+        email: result.user.email
+    }, '*');
+} else {
+    // Regular redirect
+    window.location = returnTo + '?token=' + token + '&uid=' + uid + '&email=' + email;
+}
+      // If we just returned from a redirect flow, handle it
+      try {
+        getRedirectResult(auth)
+          .then(async (res) => {
+            if (res && res.user) {
+              statusEl.textContent = "Signed in via redirect. Finishing…";
+              const token = await res.user.getIdToken();
+              const target = new URL(returnTo);
+              target.searchParams.set("token", token);
+              target.searchParams.set("uid", res.user.uid);
+              target.searchParams.set("email", encodeURIComponent(res.user.email || ""));
+              window.location = target.toString();
+            }
+          })
+          .catch((err) => {
+            console.error("getRedirectResult error:", err);
+          });
+      } catch (e) {
+        console.warn("getRedirectResult not available:", e);
+      }
 
       document.getElementById("google").onclick = async () => {
-        const provider = new GoogleAuthProvider();
-        const result = await signInWithPopup(auth, provider);
-        const token = await result.user.getIdToken();   // short-lived ID token
-        const uid = result.user.uid;
-        const email = encodeURIComponent(result.user.email || "");
-
-        const target = new URL("https://whattoflie.streamlit.app/");
-        target.searchParams.set("token", token);
-        target.searchParams.set("uid", uid);
-        target.searchParams.set("email", email);
-        window.location = target.toString();
+        errorsEl.textContent = "";
+        statusEl.textContent = "Opening Google sign-in…";
+        try {
+          const result = await signInWithPopup(auth, provider);
+          statusEl.textContent = "Sign-in successful. Exchanging token…";
+          const token = await result.user.getIdToken();
+          const target = new URL(returnTo);
+          target.searchParams.set("token", token);
+          target.searchParams.set("uid", result.user.uid);
+          target.searchParams.set("email", encodeURIComponent(result.user.email || ""));
+          window.location = target.toString();
+        } catch (e) {
+          console.error("Popup auth error:", e);
+          // Common: unauthorized domain or popup blocked; fall back to redirect
+          if (e?.code === "auth/unauthorized-domain" || e?.code === "auth/popup-blocked") {
+            statusEl.textContent = "Falling back to redirect…";
+            try {
+              await signInWithRedirect(auth, provider);
+            } catch (e2) {
+              errorsEl.textContent =
+                `Redirect also failed.\n` +
+                `Error: ${e2?.code || ""} ${e2?.message || e2}\n\n` +
+                `If you're developing locally, open the app at http://localhost:8501 ` +
+                `or add ${location.hostname} under Firebase Auth → Settings → Authorized domains.`;
+              statusEl.textContent = "Sign-in failed.";
+            }
+          } else {
+            errorsEl.textContent = `${e?.code || ""} ${e?.message || e}`;
+            statusEl.textContent = "Sign-in failed.";
+          }
+        }
       };
     </script>
   </body>
 </html>
-
-{
-  "hosting": {
-    "public": "public",
-    "rewrites": [
-      { "source": "/login", "destination": "/login.html" }
-    ]
-  }
-}
-<button id="logout">Sign out</button>
-<script type="module">
-  import { getAuth, signOut } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
-  // ... after you initialize auth
-  document.getElementById("logout").onclick = () => signOut(auth);
-</script>

@@ -86,46 +86,52 @@ FIREBASE_WEB_CONFIG = dict(st.secrets.get("firebase_web", {})) or {
 # =============================
 # Improved Google Sign-In
 # =============================
-def render_google_login_button():
-    # Use the external login page
+def render_google_login_popup():
+    """Open login in popup to avoid redirects"""
+    
     login_url = "https://whattoflie.web.app/login.html"
     
-    # Add return URL parameter
-    current_url = "https://whattoflie.streamlit.app/"
-    login_url_with_return = f"{login_url}?return_to={current_url}"
-    
-    st.markdown(
+    components.html(
         f"""
-        <div style="text-align: center; padding: 20px; border: 2px solid #4285f4; border-radius: 8px;">
-            <a href="{login_url_with_return}" target="_self" style="
-                display: inline-block;
-                padding: 12px 24px; 
-                background: #4285f4; 
-                color: white; 
-                text-decoration: none;
-                border-radius: 6px; 
-                font-size: 16px;
-                width: 250px;
-                text-align: center;
-            ">
-                🔑 Sign in with Google
-            </a>
-            <div style="margin-top: 10px; color: #666; font-size: 14px;">
-                Click to sign in via secure portal
-            </div>
-        </div>
+        <script>
+        function openLoginPopup() {{
+            const popup = window.open(
+                '{login_url}?popup=true',
+                'GoogleLogin',
+                'width=500,height=600'
+            );
+            
+            // Listen for messages from popup
+            window.addEventListener('message', function(e) {{
+                if (e.origin !== 'https://whattoflie.web.app') return;
+                
+                if (e.data.type === 'auth_success') {{
+                    popup.close();
+                    // Reload with token in URL
+                    window.location.href = window.location.origin + 
+                        window.location.pathname + 
+                        '?token=' + e.data.token + 
+                        '&uid=' + e.data.uid + 
+                        '&email=' + e.data.email;
+                }}
+            }});
+        }}
+        </script>
+        
+        <button onclick="openLoginPopup()" style="
+            padding: 12px 24px;
+            background: #4285f4;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+        ">
+            🔑 Sign in with Google (Popup)
+        </button>
         """,
-        unsafe_allow_html=True,
+        height=60
     )
-
-def render_google_signout_button():
-    if st.button("Sign out", type="secondary", use_container_width=False):
-        # Clear session state
-        st.session_state.pop("firebase_uid", None)
-        st.session_state.pop("firebase_email", None)
-        # Clear URL params
-        st.query_params.clear()
-        st.rerun()
 
 # =============================
 # Authentication Processing (FIXED - No Redirect Loop)
