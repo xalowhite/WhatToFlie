@@ -71,9 +71,9 @@ def _firebase_config_js(cfg: dict) -> str:
 # Improved Google Sign-In
 # =============================
 def render_google_login_button():
-    """Render Google sign-in with comprehensive fallbacks"""
+    """Debug version with more verbose logging"""
     components.html(f"""
-        <div style="text-align: center; padding: 20px;">
+        <div style="text-align: center; padding: 20px; border: 2px solid #4285f4; border-radius: 8px;">
             <button id="google-signin" style="
                 padding: 12px 24px; 
                 background: #4285f4; 
@@ -86,113 +86,111 @@ def render_google_login_button():
             ">
                 🔑 Sign in with Google
             </button>
-            <div id="status" style="margin-top: 10px; color: #666; font-size: 14px;"></div>
-            <div id="debug" style="margin-top: 10px; color: #999; font-size: 12px;"></div>
+            <div id="status" style="margin-top: 10px; color: #666; font-size: 14px;">Ready to test...</div>
+            <div id="debug" style="margin-top: 10px; color: #999; font-size: 12px;">Debug info will appear here</div>
+            <div id="errors" style="margin-top: 10px; color: #dc3545; font-size: 12px;"></div>
         </div>
         
-        <script type="module">
-            console.log("Starting Firebase auth initialization...");
+        <script>
+            console.log("🔥 Script loaded - checking if this appears in browser console");
             
             const statusEl = document.getElementById("status");
             const debugEl = document.getElementById("debug");
+            const errorsEl = document.getElementById("errors");
             
-            statusEl.textContent = "Loading authentication...";
+            statusEl.textContent = "JavaScript loaded successfully";
+            debugEl.textContent = "Attempting to load Firebase modules...";
             
-            try {{
-                // Import Firebase modules
-                const {{ initializeApp }} = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js");
-                const {{ 
-                    getAuth, 
-                    GoogleAuthProvider,
-                    signInWithPopup, 
-                    signInWithRedirect, 
-                    getRedirectResult 
-                }} = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js");
+            // Test if the button click works at all
+            document.getElementById("google-signin").onclick = () => {{
+                console.log("🔥 Button clicked!");
+                statusEl.textContent = "Button clicked - starting authentication...";
+                debugEl.textContent = "Loading Firebase modules...";
                 
-                debugEl.textContent = "Firebase modules loaded";
-                
-                // Initialize Firebase
-                const firebaseConfig = {_firebase_config_js(FIREBASE_WEB_CONFIG)};
-                const app = initializeApp(firebaseConfig);
-                const auth = getAuth(app);
-                const provider = new GoogleAuthProvider();
-                
-                debugEl.textContent = "Firebase initialized, checking redirect result...";
-                
-                // Check for redirect result on page load
+                // Try to load Firebase
+                loadFirebaseAndAuth();
+            }};
+            
+            async function loadFirebaseAndAuth() {{
                 try {{
-                    const result = await getRedirectResult(auth);
-                    if (result && result.user) {{
-                        debugEl.textContent = "Found redirect result, processing...";
-                        await handleAuthSuccess(result.user);
-                        return;
-                    }}
-                }} catch (redirectError) {{
-                    console.error("Redirect result error:", redirectError);
-                    debugEl.textContent = "Redirect check failed: " + redirectError.message;
-                }}
-                
-                statusEl.textContent = "Ready to sign in";
-                debugEl.textContent = "Click button to authenticate";
-                
-                // Handle sign-in button click
-                document.getElementById("google-signin").onclick = async () => {{
-                    statusEl.textContent = "Starting sign-in...";
-                    debugEl.textContent = "Attempting popup authentication...";
+                    console.log("🔥 Loading Firebase modules...");
+                    debugEl.textContent = "Importing Firebase...";
                     
+                    const {{ initializeApp }} = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js");
+                    console.log("✅ Firebase app module loaded");
+                    
+                    const {{ 
+                        getAuth, 
+                        GoogleAuthProvider,
+                        signInWithPopup, 
+                        signInWithRedirect, 
+                        getRedirectResult 
+                    }} = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js");
+                    console.log("✅ Firebase auth module loaded");
+                    
+                    debugEl.textContent = "Firebase modules loaded, initializing...";
+                    
+                    // Initialize Firebase
+                    const firebaseConfig = {_firebase_config_js(FIREBASE_WEB_CONFIG)};
+                    console.log("🔥 Firebase config:", firebaseConfig);
+                    
+                    const app = initializeApp(firebaseConfig);
+                    console.log("✅ Firebase app initialized");
+                    
+                    const auth = getAuth(app);
+                    const provider = new GoogleAuthProvider();
+                    console.log("✅ Auth and provider ready");
+                    
+                    debugEl.textContent = "Attempting popup sign-in...";
+                    statusEl.textContent = "Opening Google sign-in...";
+                    
+                    // Try popup
                     try {{
-                        // Try popup first
+                        console.log("🔥 Attempting popup sign-in...");
                         const result = await signInWithPopup(auth, provider);
-                        debugEl.textContent = "Popup success, processing token...";
-                        await handleAuthSuccess(result.user);
-                    }} catch (popupError) {{
-                        console.error("Popup sign-in failed:", popupError);
-                        debugEl.textContent = "Popup failed: " + popupError.code + ", trying redirect...";
+                        console.log("✅ Popup sign-in successful!", result.user.email);
                         
-                        // Fallback to redirect
+                        statusEl.textContent = "Sign-in successful! Getting token...";
+                        
+                        const token = await result.user.getIdToken();
+                        console.log("✅ Token received");
+                        
+                        // Redirect with token
+                        const url = new URL(window.location.href);
+                        url.searchParams.set("token", token);
+                        url.searchParams.set("uid", result.user.uid);
+                        url.searchParams.set("email", encodeURIComponent(result.user.email || ""));
+                        
+                        statusEl.textContent = "Redirecting...";
+                        window.location.href = url.toString();
+                        
+                    }} catch (popupError) {{
+                        console.error("❌ Popup failed:", popupError);
+                        debugEl.textContent = "Popup failed: " + popupError.code + " - trying redirect...";
+                        
+                        // Try redirect fallback
                         try {{
+                            console.log("🔥 Attempting redirect sign-in...");
                             statusEl.textContent = "Redirecting to Google...";
                             await signInWithRedirect(auth, provider);
                         }} catch (redirectError) {{
-                            console.error("Redirect sign-in failed:", redirectError);
+                            console.error("❌ Redirect also failed:", redirectError);
+                            errorsEl.textContent = "Both popup and redirect failed: " + redirectError.message;
                             statusEl.textContent = "Sign-in failed";
-                            debugEl.textContent = "Both popup and redirect failed: " + redirectError.message;
                         }}
                     }}
-                }};
-                
-                async function handleAuthSuccess(user) {{
-                    try {{
-                        statusEl.textContent = "Getting authentication token...";
-                        const token = await user.getIdToken();
-                        
-                        debugEl.textContent = "Token received, redirecting...";
-                        
-                        // Build redirect URL
-                        const url = new URL(window.location.href);
-                        url.searchParams.set("token", token);
-                        url.searchParams.set("uid", user.uid);
-                        url.searchParams.set("email", encodeURIComponent(user.email || ""));
-                        
-                        statusEl.textContent = "Completing sign-in...";
-                        
-                        // Redirect to complete auth
-                        window.location.href = url.toString();
-                        
-                    }} catch (tokenError) {{
-                        console.error("Token error:", tokenError);
-                        statusEl.textContent = "Authentication failed";
-                        debugEl.textContent = "Token error: " + tokenError.message;
-                    }}
+                    
+                }} catch (importError) {{
+                    console.error("❌ Firebase import error:", importError);
+                    errorsEl.textContent = "Firebase import failed: " + importError.message;
+                    statusEl.textContent = "Authentication system unavailable";
+                    debugEl.textContent = "Check browser console for details";
                 }}
-                
-            }} catch (importError) {{
-                console.error("Firebase import error:", importError);
-                statusEl.textContent = "Authentication system unavailable";
-                debugEl.textContent = "Import error: " + importError.message;
             }}
+            
+            console.log("🔥 Script setup complete - button should be clickable");
         </script>
-    """, height=150)
+    """, height=200)
 
 def render_google_signout_button():
     """Render sign-out button"""
@@ -393,15 +391,47 @@ def load_flies_local(path: str) -> pd.DataFrame:
     return build_flies_df(raw)
 
 # ---------- GitHub fetch
-def gh_url(path: str) -> str:
-    """Build a raw GitHub URL from secrets.
-    Looks for [github].raw_base, or top-level raw_base, or gcp_service_account.raw_base.
-    Expect a value like: https://raw.githubusercontent.com/user/repo/main
-    """
-    base = (st.secrets.get("github", {}) or {}).get("raw_base", "")
-    if not base:
-        base = st.secrets.get("raw_base", "") or (st.secrets.get("gcp_service_account", {}) or {}).get("raw_base", "")
-    return f"{base.rstrip('/')}/{path.lstrip('/')}"
+@st.cache_data
+def load_subs_local() -> dict[str, set[str]]:
+    """Load substitutions from local data directory"""
+    d = {}
+    try:
+        sub_df = pd.read_csv("data/substitutions.csv", encoding="utf-8", engine="python")
+        for _, row in sub_df.iterrows():
+            base = normalize(row.get("material", ""))
+            eq_raw = row.get("equivalents", "")
+            eqs = set()
+            if isinstance(eq_raw, str):
+                for e in eq_raw.split(";"):
+                    e = normalize(e)
+                    if e:
+                        eqs.add(e)
+            if base:
+                d[base] = eqs
+        st.success(f"✅ Loaded {len(d)} substitution rules")
+    except FileNotFoundError:
+        st.warning("⚠️ data/substitutions.csv not found")
+    except Exception as e:
+        st.warning(f"⚠️ Error loading substitutions: {e}")
+    return d
+
+@st.cache_data
+def load_aliases_local() -> dict[str, str]:
+    """Load aliases from local data directory"""
+    d = {}
+    try:
+        df = pd.read_csv("data/aliases.csv", encoding="utf-8", engine="python")
+        for _, row in df.iterrows():
+            a = normalize(row.get('alias',''))
+            c = normalize(row.get('canonical',''))
+            if a and c:
+                d[a] = c
+        st.success(f"✅ Loaded {len(d)} aliases")
+    except FileNotFoundError:
+        st.warning("⚠️ data/aliases.csv not found")
+    except Exception as e:
+        st.warning(f"⚠️ Error loading aliases: {e}")
+    return d
 
 @st.cache_data
 def read_csv_from_github(path: str, *, sep=",") -> pd.DataFrame:
