@@ -14,6 +14,7 @@ from urllib.error import URLError
 import requests
 import streamlit.components.v1 as components
 
+
 # =============================
 # App meta (MUST BE FIRST)
 # =============================
@@ -79,115 +80,45 @@ FIREBASE_WEB_CONFIG = dict(st.secrets.get("firebase_web", {})) or {
 # Improved Google Sign-In
 # =============================
 def render_google_login_button():
-    cfg_js = json.dumps(FIREBASE_WEB_CONFIG, separators=(",", ":"))
-    components.html(
+    # Use the external login page
+    login_url = "https://whattoflie.web.app/login.html"
+    
+    # Add return URL parameter
+    current_url = "https://whattoflie.streamlit.app/"
+    login_url_with_return = f"{login_url}?return_to={current_url}"
+    
+    st.markdown(
         f"""
         <div style="text-align: center; padding: 20px; border: 2px solid #4285f4; border-radius: 8px;">
-            <button id="google-signin" style="
+            <a href="{login_url_with_return}" target="_self" style="
+                display: inline-block;
                 padding: 12px 24px; 
                 background: #4285f4; 
                 color: white; 
-                border: none; 
+                text-decoration: none;
                 border-radius: 6px; 
-                cursor: pointer; 
                 font-size: 16px;
                 width: 250px;
+                text-align: center;
             ">
                 🔑 Sign in with Google
-            </button>
-            <div id="status" style="margin-top: 10px; color: #666; font-size: 14px;">Ready to test...</div>
-            <div id="debug" style="margin-top: 10px; color: #999; font-size: 12px;">Debug info will appear here</div>
-            <div id="errors" style="margin-top: 10px; color: #dc3545; font-size: 12px;"></div>
+            </a>
+            <div style="margin-top: 10px; color: #666; font-size: 14px;">
+                Click to sign in via secure portal
+            </div>
         </div>
-
-        <script type="module">
-            const statusEl = document.getElementById("status");
-            const debugEl = document.getElementById("debug");
-            const errorsEl = document.getElementById("errors");
-
-            statusEl.textContent = "JavaScript loaded successfully";
-            debugEl.textContent = "Click the button to start Firebase auth...";
-
-            document.getElementById("google-signin").onclick = async () => {{
-                statusEl.textContent = "Starting authentication...";
-                debugEl.textContent = "Loading Firebase modules...";
-
-                try {{
-                    const {{ initializeApp }} = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js");
-                    const {{
-                        getAuth,
-                        GoogleAuthProvider,
-                        signInWithPopup,
-                        signInWithRedirect,
-                        getRedirectResult
-                    }} = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js");
-
-                    const firebaseConfig = {cfg_js};
-                    const app = initializeApp(firebaseConfig);
-                    const auth = getAuth(app);
-                    const provider = new GoogleAuthProvider();
-
-                    try {{
-                        statusEl.textContent = "Opening Google sign-in...";
-                        const result = await signInWithPopup(auth, provider);
-                        const token = await result.user.getIdToken();
-
-                        const url = new URL(window.location.href);
-                        url.searchParams.set("token", token);
-                        url.searchParams.set("uid", result.user.uid || "");
-                        url.searchParams.set("email", encodeURIComponent(result.user.email || ""));
-                        statusEl.textContent = "Redirecting...";
-                        window.location.href = url.toString();
-                    }} catch (popupError) {{
-                        debugEl.textContent = "Popup failed: " + (popupError && popupError.code ? popupError.code : "unknown") + " — trying redirect...";
-                        try {{
-                            statusEl.textContent = "Redirecting to Google...";
-                            await signInWithRedirect(auth, provider);
-                        }} catch (redirectError) {{
-                            errorsEl.textContent = "Both popup and redirect failed: " + (redirectError && redirectError.message ? redirectError.message : redirectError);
-                            statusEl.textContent = "Sign-in failed";
-                        }}
-                    }}
-                }} catch (importError) {{
-                    errorsEl.textContent = "Firebase import failed: " + (importError && importError.message ? importError.message : importError);
-                    statusEl.textContent = "Authentication system unavailable";
-                    debugEl.textContent = "Check browser console for details";
-                }}
-            }};
-        </script>
         """,
-        height=220,
+        unsafe_allow_html=True,
     )
 
 def render_google_signout_button():
-    components.html(
-        """
-        <div style="text-align: center; padding: 10px;">
-            <button id="logout" style="
-                padding: 8px 16px;
-                background: #dc3545;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                cursor: pointer;
-                font-size: 14px;
-            ">
-                Sign out
-            </button>
-        </div>
-        <script type="module">
-            document.getElementById("logout").onclick = () => {
-                const url = new URL(window.location.href);
-                url.searchParams.set("logout", "1");
-                url.searchParams.delete("token");
-                url.searchParams.delete("uid"); 
-                url.searchParams.delete("email");
-                window.location.href = url.toString();
-            };
-        </script>
-        """,
-        height=70,
-    )
+    if st.button("Sign out", type="secondary", use_container_width=False):
+        # Clear session state
+        st.session_state.pop("firebase_uid", None)
+        st.session_state.pop("firebase_email", None)
+        # Clear URL params
+        st.query_params.clear()
+        st.rerun()
 
 # =============================
 # Authentication Processing
