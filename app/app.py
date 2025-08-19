@@ -85,37 +85,15 @@ FIREBASE_WEB_CONFIG = dict(st.secrets.get("firebase_web", {})) or {
 # Improved Google Sign-In
 # =============================
 def render_google_login_popup():
-    """Use full-page redirect (sandboxed iframe can't keep window.opener)."""
+    # Single, reliable button that navigates the WHOLE page (no iframe JS)
     login_url = "https://whattoflie.web.app/login.html"
+    # If you also run locally, you can branch this:
+    return_to = "https://whattoflie.streamlit.app/"  # prod app base URL
 
-    components.html(
-        f"""
-        <script>
-        (function() {{
-          function goLogin() {{
-            const base = window.top.location.origin + window.top.location.pathname;
-            const url = new URL('{login_url}');
-            url.searchParams.set('popup', 'false');   // force non-popup mode
-            url.searchParams.set('return_to', base);  // where login.html should send us back
-            window.top.location.href = url.toString();
-          }}
-          window.goLogin = goLogin;
-        }})();
-        </script>
-
-        <button onclick="goLogin()" style="
-            padding: 12px 24px;
-            background: #4285f4;
-            color: white;
-            border: none;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 16px;
-        ">
-            🔑 Sign in with Google
-        </button>
-        """,
-        height=60
+    st.link_button(
+        "🔑 Sign in with Google",
+        f"{login_url}?popup=false&return_to={return_to}",
+        help="Redirect to Google sign-in, then back here.",
     )
 
 
