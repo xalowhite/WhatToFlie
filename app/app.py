@@ -1030,6 +1030,11 @@ hook_map = {
 # =============================
 if "inventory_df" not in st.session_state:
     st.session_state.inventory_df = pd.DataFrame(columns=["material", "status", "brand", "model"])
+if "matches_df" not in st.session_state:
+    st.session_state.matches_df = None
+
+if "matches_sim" not in st.session_state:
+    st.session_state.matches_sim = None
 
 st.header("📝 Manage Inventory (optional)")
 st.info(
@@ -1303,11 +1308,11 @@ with cA:
     if st.button("Save to Cloud (inventory editor)"):
         if st.session_state.inventory_df.empty:
             st.warning("Inventory editor is empty. Add rows first.")
-        elif save_user_inventory(acct_id, st.session_state.inventory_df):
+        elif save_user_inventory(st.session_state.inventory_df):
             st.success("Saved your inventory to the cloud.")
 with cB:
     if st.button("Load from Cloud (replace editor)"):
-        df_cloud = load_user_inventory(acct_id)
+        df_cloud = load_user_inventory()
         if df_cloud is None:
             st.warning("No cloud inventory found for this account.")
         else:
@@ -1321,9 +1326,9 @@ with cB:
             st.rerun()
 
 # --- Auto-load inventory & prefs once per session (after inputs are visible)
-if DB is not None and st.session_state.get("account_id") and not st.session_state.get("did_auto_load"):
+if DB is not None and st.session_state.get("firebase_uid") and not st.session_state.get("did_auto_load"):
     try:
-        df_cloud = load_user_inventory(st.session_state["account_id"])
+        df_cloud = load_user_inventory()
         if isinstance(df_cloud, pd.DataFrame) and not df_cloud.empty:
             expected = ["material", "status", "brand", "model"]
             for col in expected:
@@ -1333,7 +1338,7 @@ if DB is not None and st.session_state.get("account_id") and not st.session_stat
                 df_cloud[expected].fillna("").drop_duplicates().reset_index(drop=True)
             )
 
-        prefs = load_user_prefs(st.session_state["account_id"])
+        prefs = load_user_prefs(st.session_state["firebase_uid"])
         if prefs:
             for k in [
                 "pref_use_subs",
@@ -1378,428 +1383,441 @@ if st.session_state.get("quickstart_run"):
     run_now = True
     st.session_state["quickstart_run"] = False
 
-if not run_now:
-    st.info("Click **Run matching** after uploads/changes.")
-    st.stop()
+if run_now:
+    if "flies_df" not in locals() or locals()["flies_df"].empty:
+        st.error("No recipes loaded. Please upload a valid flies.csv or use the bundled one from data/flies.csv.")
+        st.stop()
 
-if "flies_df" not in locals() or locals()["flies_df"].empty:
-    st.error("No recipes loaded. Please upload a valid flies.csv or use the bundled one from data/flies.csv.")
-    st.stop()
+    flies_df = locals()["flies_df"]
+    aliases_map = locals().get("aliases_map", {})
+    subs_map = locals().get("subs_map", {})
+    prefer_brands = locals().get("prefer_brands", True)
+    size_tol = locals().get("size_tol", 2)
+    require_len = locals().get("require_len", False)
 
-flies_df = locals()["flies_df"]
-aliases_map = locals().get("aliases_map", {})
-subs_map = locals().get("subs_map", {})
-prefer_brands = locals().get("prefer_brands", True)
-size_tol = locals().get("size_tol", 2)
-require_len = locals().get("require_len", False)
-
-# Build inventory tokens
-inv_tokens_step3 = locals().get("inv_tokens_from_step3", set())
-inv_editor_df = st.session_state.get("inventory_df", pd.DataFrame(columns=["material", "status", "brand", "model"]))
-if not inv_editor_df.empty:
-    present_mask_editor = inv_editor_df.get("status", "").astype(str).str.upper().ne("OUT")
-    inv_tokens_editor = set(inv_editor_df.loc[present_mask_editor, "material"].dropna().map(normalize).tolist())
-else:
-    inv_tokens_editor = set()
-
-if inv_source == "Step 3 upload/paste/sample":
-    inv_tokens = inv_tokens_step3
-elif inv_source == "Inventory Editor (session)":
-    inv_tokens = inv_tokens_editor
-else:
-    inv_tokens = inv_tokens_step3.union(inv_tokens_editor)
-
-# Compute matches
-matches_df = compute_matches(
-    flies_df=flies_df,
-    inv_tokens=inv_tokens,
-    aliases_map=aliases_map,
-    subs_map=subs_map,
-    use_subs=locals().get("use_subs", True),
-    ignore_labels=locals().get("ignore_labels", True),
-    ignore_color=locals().get("ignore_color", True),
-    color_map=color_map,
-    hook_map=hook_map,
-    size_tolerance=size_tol,
-    require_length_match=require_len,
-)
-
-# Attach first tutorial link
-matches_df = matches_df.merge(flies_df[["fly_name", "tutorials"]], on="fly_name", how="left")
-matches_df["tutorial"] = matches_df["tutorials"].apply(first_http_link)
-matches_df.drop(columns=["tutorials"], inplace=True)
-
-# =============================
-# Results & tools
-# =============================
-st.subheader("Summary")
-c1, c2, c3 = st.columns(3)
-c1.metric("✅ Can tie now", int((matches_df["missing_count"] == 0).sum()))
-c2.metric("🟡 Missing 1", int((matches_df["missing_count"] == 1).sum()))
-c3.metric("🟠 Missing 2", int((matches_df["missing_count"] == 2).sum()))
-
-types = sorted(flies_df["type"].dropna().unique().tolist())
-species_all = sorted(set(itertools.chain.from_iterable(flies_df["species"].tolist())))
-col1, col2, col3 = st.columns(3)
-with col1:
-    type_filter = st.multiselect("Filter by type", types, default=types)
-with col2:
-    species_filter = st.multiselect("Filter by species", species_all, default=species_all)
-with col3:
-    show_cols = st.multiselect(
-        "Columns to show",
-        ["fly_name", "type", "species", "required_count", "missing_count", "missing", "tutorial"],
-        default=["fly_name", "type", "species", "required_count", "missing_count", "missing", "tutorial"],
-    )
-
-fly_query = st.text_input("🔎 Search by fly name", "", placeholder="e.g. elk hair, pheasant tail, zonker...")
-near_miss_cap = st.slider(
-    "Near-miss threshold (≤ this many missing)", 2, 6, 3, help="Show and aggregate flies that are within this many missing materials."
-)
-
-def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
-    mask_type = df["type"].isin(type_filter)
-    mask_species = df["species"].apply(lambda s: any(sp in s for sp in species_filter))
-    mask_query = df["fly_name"].str.contains(fly_query.strip(), case=False, na=False) if fly_query.strip() else True
-    out = df[mask_type & mask_species & mask_query].copy()
-    if show_cols:
-        keep = [c for c in show_cols if c in out.columns]
-        out = out[keep]
-    return out
-
-# Tabs
-tab1, tab2, tab3, tabN, tab4, tab5, tabW = st.tabs(
-    ["✅ Can tie now", "🟡 Missing 1", "🟠 Missing 2", f"🟣 Near misses (≤{near_miss_cap})", "🛒 Best buys", "📦 Inventory status & brands", "🧪 What-if"]
-)
-
-with tab1:
-    df = apply_filters(matches_df[matches_df["missing_count"] == 0])
-    st.dataframe(df, use_container_width=True)
-    if df.empty:
-        st.info("No results here with the current filters. Try widening Type/Species or raising the near-miss threshold.")
-
-with tab2:
-    df = apply_filters(matches_df[matches_df["missing_count"] == 1])
-    st.dataframe(df, use_container_width=True)
-    if df.empty:
-        st.info("No results here with the current filters. Try widening Type/Species or raising the near-miss threshold.")
-    miss_pool_1 = []
-    for cell in df["missing"].dropna():
-        miss_pool_1.extend([x.strip() for x in str(cell).split(";") if x.strip()])
-    miss_opts_1 = sorted(set(miss_pool_1))
-    sel_add_1 = st.multiselect("➕ Add these missing items to the Inventory Editor", miss_opts_1, key="add_miss1")
-    if st.button("Add selected to Editor", key="btn_add_miss1"):
-        def add_items_to_editor(items: list[str]) -> int:
-            if not items:
-                return 0
-            base = st.session_state.get("inventory_df", pd.DataFrame(columns=["material", "status", "brand", "model"]))
-            base = base.copy()
-            new_rows = []
-            for raw in items:
-                tok = normalize(raw)
-                if not tok:
-                    continue
-                if not base.empty and (base["material"].astype(str).str.lower() == tok).any():
-                    continue
-                mat, brand, model = normalize_inventory_entry(tok, "", "")
-                new_rows.append({"material": mat, "status": "NEW", "brand": brand, "model": model})
-            if new_rows:
-                st.session_state.inventory_df = (
-                    pd.concat([base, pd.DataFrame(new_rows)], ignore_index=True).drop_duplicates().reset_index(drop=True)
-                )
-                return len(new_rows)
-            return 0
-
-        added = add_items_to_editor(sel_add_1)
-        st.success(f"Added {added} item(s) to the editor.")
-
-with tab3:
-    df = apply_filters(matches_df[matches_df["missing_count"] == 2])
-    st.dataframe(df, use_container_width=True)
-    if df.empty:
-        st.info("No results here with the current filters. Try widening Type/Species or raising the near-miss threshold.")
-    miss_pool_2 = []
-    for cell in df["missing"].dropna():
-        miss_pool_2.extend([x.strip() for x in str(cell).split(";") if x.strip()])
-    miss_opts_2 = sorted(set(miss_pool_2))
-    sel_add_2 = st.multiselect("➕ Add these missing items to the Inventory Editor", miss_opts_2, key="add_miss2")
-    if st.button("Add selected to Editor", key="btn_add_miss2"):
-        def add_items_to_editor(items: list[str]) -> int:
-            if not items:
-                return 0
-            base = st.session_state.get("inventory_df", pd.DataFrame(columns=["material", "status", "brand", "model"]))
-            base = base.copy()
-            new_rows = []
-            for raw in items:
-                tok = normalize(raw)
-                if not tok:
-                    continue
-                if not base.empty and (base["material"].astype(str).str.lower() == tok).any():
-                    continue
-                mat, brand, model = normalize_inventory_entry(tok, "", "")
-                new_rows.append({"material": mat, "status": "NEW", "brand": brand, "model": model})
-            if new_rows:
-                st.session_state.inventory_df = (
-                    pd.concat([base, pd.DataFrame(new_rows)], ignore_index=True).drop_duplicates().reset_index(drop=True)
-                )
-                return len(new_rows)
-            return 0
-
-        added = add_items_to_editor(sel_add_2)
-        st.success(f"Added {added} item(s) to the editor.")
-
-with tabN:
-    df = apply_filters(matches_df[matches_df["missing_count"] <= near_miss_cap])
-    st.dataframe(df.sort_values(["missing_count", "required_count", "fly_name"]), use_container_width=True)
-    if df.empty:
-        st.info("No results here with the current filters. Try widening Type/Species or raising the near-miss threshold.")
-
-with tab4:
-    singles = best_single_buys(matches_df)
-    try:
-        hooks_catalog = read_csv_from_github("data/hooks_catalog.csv")
-    except Exception:
-        hooks_catalog = pd.read_csv("data/hooks_catalog.csv", encoding="utf-8", engine="python")
-    try:
-        df_bp = read_csv_from_github("data/brand_prefs.csv")
-        brand_prefs = {}
-        for _, row in df_bp.iterrows():
-            cat = normalize(row.get("category", ""))
-            prefs = row.get("preferred_brands", "")
-            arr = [p.strip() for p in str(prefs).split(";") if str(p).strip()]
-            if cat:
-                brand_prefs[cat] = arr
-    except Exception:
-        brand_prefs = {}
-
-    singles = enrich_buy_suggestions(singles, prefer_brands, hooks_catalog, brand_prefs, hook_map)
-    pairs = best_pair_buys(matches_df)
-
-    c4, c5 = st.columns(2)
-    with c4:
-        st.markdown("**Top single items to buy (unlocks immediately):**")
-        st.dataframe(singles, use_container_width=True)
-        if singles.empty:
-            st.info("No single-item unlocks with current filters.")
-        st.download_button(
-            "⬇️ Download top singles (enriched)",
-            singles.to_csv(index=False).encode("utf-8"),
-            file_name="best_single_buys_enriched.csv",
-            mime="text/csv",
-        )
-    with c5:
-        st.markdown("**Top two-item combos (buy both to unlock):**")
-        st.dataframe(pairs, use_container_width=True)
-        if pairs.empty:
-            st.info("No two-item combos with current filters.")
-        st.download_button(
-            "⬇️ Download top pairs",
-            pairs.to_csv(index=False).encode("utf-8"),
-            file_name="best_pair_buys.csv",
-            mime="text/csv",
-        )
-
-    shopping_df = make_shopping_list(matches_df, max_missing=near_miss_cap)
-    shopping_df = enrich_buy_suggestions(shopping_df, prefer_brands, hooks_catalog, brand_prefs, hook_map)
-    st.download_button(
-        "⬇️ Download shopping list (enriched CSV)",
-        shopping_df.to_csv(index=False).encode("utf-8"),
-        file_name="shopping_list_enriched.csv",
-        mime="text/csv",
-    )
-
-    if not shopping_df.empty:
-        lines = []
-        for _, r in shopping_df.iterrows():
-            line = f"- {r.get('material','')}"
-            if prefer_brands and str(r.get("suggested_brand", "")).strip():
-                bm = f"{r.get('suggested_brand','')} {r.get('suggested_model','')}".strip()
-                if bm:
-                    line += f" — {bm}"
-            lines.append(line)
-        shopping_text = "\n".join(lines)
-        st.markdown("**Shopping list (plain text):**")
-        st.text_area("Copyable shopping list", shopping_text, height=150, label_visibility="collapsed")
-        escaped = json.dumps(shopping_text)
-        st.markdown(
-            f"""
-            <button onClick='navigator.clipboard.writeText({escaped});' style="margin-top:6px;padding:6px 10px;border-radius:8px;border:1px solid #ccc;cursor:pointer">
-              📋 Copy shopping list
-            </button>
-            """,
-            unsafe_allow_html=True,
-        )
-
-with tab5:
-    st.markdown("**Inventory from Step 3 (upload/paste/sample):**")
-    inv_full_df_from_step3 = locals().get("inv_full_df_from_step3", None)
-
-    def status_badge(s: str) -> str:
-        m = str(s).upper()
-        return {"NEW": "🆕 New", "HALF": "🌓 Half", "LOW": "🪫 Low", "OUT": "⛔️ Out", "": ""}.get(m, m)
-
-    if inv_full_df_from_step3 is not None:
-        disp = inv_full_df_from_step3.copy()
-        if "status" in disp.columns:
-            disp["status_badge"] = disp["status"].apply(status_badge)
-            cols = ["status_badge"] + [c for c in ["material", "brand", "model", "status"] if c in disp.columns]
-            st.dataframe(disp[cols], use_container_width=True)
-            counts = disp["status"].fillna("").str.upper().value_counts().reset_index()
-            counts.columns = ["status", "count"]
-            st.markdown("**Counts by status:**")
-            st.dataframe(counts, use_container_width=True)
-        else:
-            st.dataframe(disp, use_container_width=True)
+    # Build inventory tokens
+    inv_tokens_step3 = locals().get("inv_tokens_from_step3", set())
+    inv_editor_df = st.session_state.get("inventory_df", pd.DataFrame(columns=["material", "status", "brand", "model"]))
+    if not inv_editor_df.empty:
+        present_mask_editor = inv_editor_df.get("status", "").astype(str).str.upper().ne("OUT")
+        inv_tokens_editor = set(inv_editor_df.loc[present_mask_editor, "material"].dropna().map(normalize).tolist())
     else:
-        st.info("Upload an inventory CSV to see statuses and brands here.")
+        inv_tokens_editor = set()
 
-    with st.expander("⚠️ Inventory QA (possible typos / unknown materials)"):
-        inv_tokens_step3 = locals().get("inv_tokens_from_step3", set())
-        inv_tokens_editor = (
-            set(st.session_state.inventory_df["material"].dropna().map(normalize).tolist())
-            if not st.session_state.inventory_df.empty
-            else set()
-        )
-        inv_all_tokens = inv_tokens_step3.union(inv_tokens_editor)
+    if inv_source == "Step 3 upload/paste/sample":
+        inv_tokens = inv_tokens_step3
+    elif inv_source == "Inventory Editor (session)":
+        inv_tokens = inv_tokens_editor
+    else:
+        inv_tokens = inv_tokens_step3.union(inv_tokens_editor)
 
-        def derive_known_material_tokens(
-            flies_df: pd.DataFrame, aliases_map: dict[str, str], subs_map: dict[str, set[str]] | None
-        ) -> set[str]:
-            known = set()
-            for lst in flies_df["materials_list"]:
-                known.update(map_aliases_list(lst, aliases_map))
-            known.update([normalize(v) for v in aliases_map.values()])
-            if subs_map:
-                for b, eqs in subs_map.items():
-                    known.add(normalize(b))
-                    known.update([normalize(e) for e in eqs])
-            return {normalize(strip_label(k)) for k in known if k}
-
-        known_tokens = derive_known_material_tokens(flies_df, aliases_map, subs_map)
-
-        suspicious = []
-        for t in sorted(inv_all_tokens):
-            if t.startswith("hook:"):
-                continue
-            cand = normalize(strip_label(apply_alias(t, aliases_map)))
-            if cand not in known_tokens:
-                suspicious.append({"material_in_inventory": t, "normalized": cand})
-
-        if suspicious:
-            st.dataframe(pd.DataFrame(suspicious), use_container_width=True)
-        else:
-            st.success("No obvious anomalies found in your inventory 🎉")
-
-with tabW:
-    st.markdown("Try adding prospective buys to your inventory and preview what unlocks.")
-    base_shop_df = make_shopping_list(matches_df, max_missing=near_miss_cap)
-    base_items = base_shop_df["material"].tolist() if not base_shop_df.empty else []
-    pick = st.multiselect(
-        "Select items to hypothetically add",
-        base_items,
-        help="Start with the shopping list; you can also type free-form entries below.",
+    # Compute matches
+    matches_df = compute_matches(
+        flies_df=flies_df,
+        inv_tokens=inv_tokens,
+        aliases_map=aliases_map,
+        subs_map=subs_map,
+        use_subs=locals().get("use_subs", True),
+        ignore_labels=locals().get("ignore_labels", True),
+        ignore_color=locals().get("ignore_color", True),
+        color_map=color_map,
+        hook_map=hook_map,
+        size_tolerance=size_tol,
+        require_length_match=require_len,
     )
-    extra_freeform = st.text_area(
-        "Optional free-form additions (one per line)", height=100, placeholder="hook: nymph #16\ndry dubbing olive\nkrystal flash pearl"
-    )
-    extra_tokens = [normalize(x) for x in extra_freeform.splitlines() if x.strip()]
 
-    simulate_btn = st.button("Run what-if simulation")
-    if simulate_btn:
-        hypothetical_inv = set(inv_tokens).union(set(pick)).union(set(extra_tokens))
-        matches_sim = compute_matches(
-            flies_df=flies_df,
-            inv_tokens=hypothetical_inv,
-            aliases_map=aliases_map,
-            subs_map=subs_map,
-            use_subs=locals().get("use_subs", True),
-            ignore_labels=locals().get("ignore_labels", True),
-            ignore_color=locals().get("ignore_color", True),
-            color_map=color_map,
-            hook_map=hook_map,
-            size_tolerance=size_tol,
-            require_length_match=require_len,
+    # Attach first tutorial link
+    matches_df = matches_df.merge(flies_df[["fly_name", "tutorials"]], on="fly_name", how="left")
+    matches_df["tutorial"] = matches_df["tutorials"].apply(first_http_link)
+    matches_df.drop(columns=["tutorials"], inplace=True)
+
+    # Store results in session state
+    st.session_state.matches_df = matches_df
+    # Clear any old simulation results
+    st.session_state.matches_sim = None
+
+
+# =============================
+# Results & tools (Display Logic)
+# =============================
+if st.session_state.matches_df is not None:
+    matches_df = st.session_state.matches_df # Use the stored results
+
+    st.subheader("Summary")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("✅ Can tie now", int((matches_df["missing_count"] == 0).sum()))
+    c2.metric("🟡 Missing 1", int((matches_df["missing_count"] == 1).sum()))
+    c3.metric("🟠 Missing 2", int((matches_df["missing_count"] == 2).sum()))
+
+    types = sorted(flies_df["type"].dropna().unique().tolist())
+    species_all = sorted(set(itertools.chain.from_iterable(flies_df["species"].tolist())))
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        type_filter = st.multiselect("Filter by type", types, default=types)
+    with col2:
+        species_filter = st.multiselect("Filter by species", species_all, default=species_all)
+    with col3:
+        show_cols = st.multiselect(
+            "Columns to show",
+            ["fly_name", "type", "species", "required_count", "missing_count", "missing", "tutorial"],
+            default=["fly_name", "type", "species", "required_count", "missing_count", "missing", "tutorial"],
         )
-        cA, cB, cC = st.columns(3)
-        cA.metric("✅ Can tie now (what-if)", int((matches_sim["missing_count"] == 0).sum()))
-        cB.metric("🟡 Missing 1 (what-if)", int((matches_sim["missing_count"] == 1).sum()))
-        cC.metric("🟠 Missing 2 (what-if)", int((matches_sim["missing_count"] == 2).sum()))
-        unlocked = matches_sim[(matches_sim["missing_count"] == 0) & (matches_df["missing_count"] > 0)]
-        st.markdown("**Newly unlocked patterns (vs. current):**")
-        st.dataframe(unlocked[["fly_name", "type", "species"]].sort_values(["type", "fly_name"]), use_container_width=True)
+
+    fly_query = st.text_input("🔎 Search by fly name", "", placeholder="e.g. elk hair, pheasant tail, zonker...")
+    near_miss_cap = st.slider(
+        "Near-miss threshold (≤ this many missing)", 2, 6, 3, help="Show and aggregate flies that are within this many missing materials."
+    )
+
+    def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
+        mask_type = df["type"].isin(type_filter)
+        mask_species = df["species"].apply(lambda s: any(sp in s for sp in species_filter))
+        mask_query = df["fly_name"].str.contains(fly_query.strip(), case=False, na=False) if fly_query.strip() else True
+        out = df[mask_type & mask_species & mask_query].copy()
+        if show_cols:
+            keep = [c for c in show_cols if c in out.columns]
+            out = out[keep]
+        return out
+
+    # Tabs
+    tab1, tab2, tab3, tabN, tab4, tab5, tabW = st.tabs(
+
+    )
+
+    with tab1:
+        df = apply_filters(matches_df[matches_df["missing_count"] == 0])
+        st.dataframe(df, use_container_width=True)
+        if df.empty:
+            st.info("No results here with the current filters. Try widening Type/Species or raising the near-miss threshold.")
+
+    with tab2:
+        df = apply_filters(matches_df[matches_df["missing_count"] == 1])
+        st.dataframe(df, use_container_width=True)
+        if df.empty:
+            st.info("No results here with the current filters. Try widening Type/Species or raising the near-miss threshold.")
+        miss_pool_1 =
+        for cell in df["missing"].dropna():
+            miss_pool_1.extend([x.strip() for x in str(cell).split(";") if x.strip()])
+        miss_opts_1 = sorted(set(miss_pool_1))
+        sel_add_1 = st.multiselect("➕ Add these missing items to the Inventory Editor", miss_opts_1, key="add_miss1")
+        if st.button("Add selected to Editor", key="btn_add_miss1"):
+            def add_items_to_editor(items: list[str]) -> int:
+                if not items:
+                    return 0
+                base = st.session_state.get("inventory_df", pd.DataFrame(columns=["material", "status", "brand", "model"]))
+                base = base.copy()
+                new_rows =
+                for raw in items:
+                    tok = normalize(raw)
+                    if not tok:
+                        continue
+                    if not base.empty and (base["material"].astype(str).str.lower() == tok).any():
+                        continue
+                    mat, brand, model = normalize_inventory_entry(tok, "", "")
+                    new_rows.append({"material": mat, "status": "NEW", "brand": brand, "model": model})
+                if new_rows:
+                    st.session_state.inventory_df = (
+                        pd.concat(, ignore_index=True).drop_duplicates().reset_index(drop=True)
+                    )
+                    return len(new_rows)
+                return 0
+
+            added = add_items_to_editor(sel_add_1)
+            st.success(f"Added {added} item(s) to the editor.")
+
+    with tab3:
+        df = apply_filters(matches_df[matches_df["missing_count"] == 2])
+        st.dataframe(df, use_container_width=True)
+        if df.empty:
+            st.info("No results here with the current filters. Try widening Type/Species or raising the near-miss threshold.")
+        miss_pool_2 =
+        for cell in df["missing"].dropna():
+            miss_pool_2.extend([x.strip() for x in str(cell).split(";") if x.strip()])
+        miss_opts_2 = sorted(set(miss_pool_2))
+        sel_add_2 = st.multiselect("➕ Add these missing items to the Inventory Editor", miss_opts_2, key="add_miss2")
+        if st.button("Add selected to Editor", key="btn_add_miss2"):
+            def add_items_to_editor(items: list[str]) -> int:
+                if not items:
+                    return 0
+                base = st.session_state.get("inventory_df", pd.DataFrame(columns=["material", "status", "brand", "model"]))
+                base = base.copy()
+                new_rows =
+                for raw in items:
+                    tok = normalize(raw)
+                    if not tok:
+                        continue
+                    if not base.empty and (base["material"].astype(str).str.lower() == tok).any():
+                        continue
+                    mat, brand, model = normalize_inventory_entry(tok, "", "")
+                    new_rows.append({"material": mat, "status": "NEW", "brand": brand, "model": model})
+                if new_rows:
+                    st.session_state.inventory_df = (
+                        pd.concat(, ignore_index=True).drop_duplicates().reset_index(drop=True)
+                    )
+                    return len(new_rows)
+                return 0
+
+            added = add_items_to_editor(sel_add_2)
+            st.success(f"Added {added} item(s) to the editor.")
+
+    with tabN:
+        df = apply_filters(matches_df[matches_df["missing_count"] <= near_miss_cap])
+        st.dataframe(df.sort_values(["missing_count", "required_count", "fly_name"]), use_container_width=True)
+        if df.empty:
+            st.info("No results here with the current filters. Try widening Type/Species or raising the near-miss threshold.")
+
+    with tab4:
+        singles = best_single_buys(matches_df)
+        try:
+            hooks_catalog = read_csv_from_github("data/hooks_catalog.csv")
+        except Exception:
+            hooks_catalog = pd.read_csv("data/hooks_catalog.csv", encoding="utf-8", engine="python")
+        try:
+            df_bp = read_csv_from_github("data/brand_prefs.csv")
+            brand_prefs = {}
+            for _, row in df_bp.iterrows():
+                cat = normalize(row.get("category", ""))
+                prefs = row.get("preferred_brands", "")
+                arr = [p.strip() for p in str(prefs).split(";") if str(p).strip()]
+                if cat:
+                    brand_prefs[cat] = arr
+        except Exception:
+            brand_prefs = {}
+
+        singles = enrich_buy_suggestions(singles, prefer_brands, hooks_catalog, brand_prefs, hook_map)
+        pairs = best_pair_buys(matches_df)
+
+        c4, c5 = st.columns(2)
+        with c4:
+            st.markdown("**Top single items to buy (unlocks immediately):**")
+            st.dataframe(singles, use_container_width=True)
+            if singles.empty:
+                st.info("No single-item unlocks with current filters.")
+            st.download_button(
+                "⬇️ Download top singles (enriched)",
+                singles.to_csv(index=False).encode("utf-8"),
+                file_name="best_single_buys_enriched.csv",
+                mime="text/csv",
+            )
+        with c5:
+            st.markdown("**Top two-item combos (buy both to unlock):**")
+            st.dataframe(pairs, use_container_width=True)
+            if pairs.empty:
+                st.info("No two-item combos with current filters.")
+            st.download_button(
+                "⬇️ Download top pairs",
+                pairs.to_csv(index=False).encode("utf-8"),
+                file_name="best_pair_buys.csv",
+                mime="text/csv",
+            )
+
+        shopping_df = make_shopping_list(matches_df, max_missing=near_miss_cap)
+        shopping_df = enrich_buy_suggestions(shopping_df, prefer_brands, hooks_catalog, brand_prefs, hook_map)
         st.download_button(
-            "⬇️ Download what-if unlocked list (CSV)",
-            unlocked[["fly_name", "type", "species"]].to_csv(index=False).encode("utf-8"),
-            file_name="what_if_unlocked.csv",
+            "⬇️ Download shopping list (enriched CSV)",
+            shopping_df.to_csv(index=False).encode("utf-8"),
+            file_name="shopping_list_enriched.csv",
             mime="text/csv",
         )
 
-# =============================
-# Export bundle
-# =============================
-st.markdown("---")
-st.subheader("⬇️ Download everything (ZIP bundle)")
+        if not shopping_df.empty:
+            lines =
+            for _, r in shopping_df.iterrows():
+                line = f"- {r.get('material','')}"
+                if prefer_brands and str(r.get("suggested_brand", "")).strip():
+                    bm = f"{r.get('suggested_brand','')} {r.get('suggested_model','')}".strip()
+                    if bm:
+                        line += f" — {bm}"
+                lines.append(line)
+            shopping_text = "\n".join(lines)
+            st.markdown("**Shopping list (plain text):**")
+            st.text_area("Copyable shopping list", shopping_text, height=150, label_visibility="collapsed")
+            escaped = json.dumps(shopping_text)
+            st.markdown(
+                f"""
+                <button onClick='navigator.clipboard.writeText({escaped});' style="margin-top:6px;padding:6px 10px;border-radius:8px;border:1px solid #ccc;cursor:pointer">
+                    📋 Copy shopping list
+                </button>
+                """,
+                unsafe_allow_html=True,
+            )
 
-if st.button("Build ZIP bundle"):
-    hooks_catalog = load_hooks_catalog("data/hooks_catalog.csv")
-    brand_prefs = load_brand_prefs("data/brand_prefs.csv")
-    singles_all = enrich_buy_suggestions(best_single_buys(matches_df), prefer_brands, hooks_catalog, brand_prefs, hook_map)
-    pairs_all = best_pair_buys(matches_df)
-    shopping_all = enrich_buy_suggestions(
-        make_shopping_list(matches_df, max_missing=near_miss_cap), prefer_brands, hooks_catalog, brand_prefs, hook_map
-    )
-
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("matches.csv", matches_df.to_csv(index=False))
-        z.writestr("best_single_buys_enriched.csv", singles_all.to_csv(index=False))
-        z.writestr("best_pair_buys.csv", pairs_all.to_csv(index=False))
-        z.writestr("shopping_list_enriched.csv", shopping_all.to_csv(index=False))
+    with tab5:
+        st.markdown("**Inventory from Step 3 (upload/paste/sample):**")
         inv_full_df_from_step3 = locals().get("inv_full_df_from_step3", None)
+
+        def status_badge(s: str) -> str:
+            m = str(s).upper()
+            return {"NEW": "🆕 New", "HALF": "🌓 Half", "LOW": "🪫 Low", "OUT": "⛔️ Out", "": ""}.get(m, m)
+
         if inv_full_df_from_step3 is not None:
-            z.writestr("inventory_step3.csv", inv_full_df_from_step3.to_csv(index=False))
-        if not st.session_state.inventory_df.empty:
-            z.writestr("inventory_editor.csv", st.session_state.inventory_df.to_csv(index=False))
-        z.writestr("flies.csv", flies_df.to_csv(index=False))
-        opts = {
-            "use_subs": bool(locals().get("use_subs", True)),
-            "ignore_labels": bool(locals().get("ignore_labels", True)),
-            "ignore_color": bool(locals().get("ignore_color", True)),
-            "size_tol": int(locals().get("size_tol", 2)),
-            "require_len": bool(locals().get("require_len", False)),
-            "near_miss_cap": int(near_miss_cap),
-            "type_filter": types,
-            "species_filter": species_all,
-        }
-        z.writestr("options.json", pd.Series(opts, dtype=object).to_json())
+            disp = inv_full_df_from_step3.copy()
+            if "status" in disp.columns:
+                disp["status_badge"] = disp["status"].apply(status_badge)
+                cols = ["status_badge"] + [c for c in ["material", "brand", "model", "status"] if c in disp.columns]
+                st.dataframe(disp[cols], use_container_width=True)
+                counts = disp["status"].fillna("").str.upper().value_counts().reset_index()
+                counts.columns = ["status", "count"]
+                st.markdown("**Counts by status:**")
+                st.dataframe(counts, use_container_width=True)
+            else:
+                st.dataframe(disp, use_container_width=True)
+        else:
+            st.info("Upload an inventory CSV to see statuses and brands here.")
 
-    st.download_button(
-        "⬇️ Download ZIP bundle", data=buf.getvalue(), file_name="fly_tying_recommender_bundle.zip", mime="application/zip"
+        with st.expander("⚠️ Inventory QA (possible typos / unknown materials)"):
+            inv_tokens_step3 = locals().get("inv_tokens_from_step3", set())
+            inv_tokens_editor = (
+                set(st.session_state.inventory_df["material"].dropna().map(normalize).tolist())
+                if not st.session_state.inventory_df.empty
+                else set()
+            )
+            inv_all_tokens = inv_tokens_step3.union(inv_tokens_editor)
+
+            def derive_known_material_tokens(
+                flies_df: pd.DataFrame, aliases_map: dict[str, str], subs_map: dict[str, set[str]] | None
+            ) -> set[str]:
+                known = set()
+                for lst in flies_df["materials_list"]:
+                    known.update(map_aliases_list(lst, aliases_map))
+                known.update([normalize(v) for v in aliases_map.values()])
+                if subs_map:
+                    for b, eqs in subs_map.items():
+                        known.add(normalize(b))
+                        known.update([normalize(e) for e in eqs])
+                return {normalize(strip_label(k)) for k in known if k}
+
+            known_tokens = derive_known_material_tokens(flies_df, aliases_map, subs_map)
+
+            suspicious =
+            for t in sorted(inv_all_tokens):
+                if t.startswith("hook:"):
+                    continue
+                cand = normalize(strip_label(apply_alias(t, aliases_map)))
+                if cand not in known_tokens:
+                    suspicious.append({"material_in_inventory": t, "normalized": cand})
+
+            if suspicious:
+                st.dataframe(pd.DataFrame(suspicious), use_container_width=True)
+            else:
+                st.success("No obvious anomalies found in your inventory 🎉")
+
+    with tabW:
+        st.markdown("Try adding prospective buys to your inventory and preview what unlocks.")
+        base_shop_df = make_shopping_list(matches_df, max_missing=near_miss_cap)
+        base_items = base_shop_df["material"].tolist() if not base_shop_df.empty else
+        pick = st.multiselect(
+            "Select items to hypothetically add",
+            base_items,
+            help="Start with the shopping list; you can also type free-form entries below.",
+        )
+        extra_freeform = st.text_area(
+            "Optional free-form additions (one per line)", height=100, placeholder="hook: nymph #16\ndry dubbing olive\nkrystal flash pearl"
+        )
+        extra_tokens = [normalize(x) for x in extra_freeform.splitlines() if x.strip()]
+
+        simulate_btn = st.button("Run what-if simulation")
+
+        if simulate_btn:
+            hypothetical_inv = set(inv_tokens).union(set(pick)).union(set(extra_tokens))
+            matches_sim = compute_matches(
+                flies_df=flies_df,
+                inv_tokens=hypothetical_inv,
+                aliases_map=aliases_map,
+                subs_map=subs_map,
+                use_subs=locals().get("use_subs", True),
+                ignore_labels=locals().get("ignore_labels", True),
+                ignore_color=locals().get("ignore_color", True),
+                color_map=color_map,
+                hook_map=hook_map,
+                size_tolerance=size_tol,
+                require_length_match=require_len,
+            )
+            st.session_state.matches_sim = matches_sim # Store simulation results
+
+        if st.session_state.matches_sim is not None:
+            matches_sim = st.session_state.matches_sim # Use stored simulation results
+            cA, cB, cC = st.columns(3)
+            cA.metric("✅ Can tie now (what-if)", int((matches_sim["missing_count"] == 0).sum()))
+            cB.metric("🟡 Missing 1 (what-if)", int((matches_sim["missing_count"] == 1).sum()))
+            cC.metric("🟠 Missing 2 (what-if)", int((matches_sim["missing_count"] == 2).sum()))
+            unlocked = matches_sim[(matches_sim["missing_count"] == 0) & (matches_df["missing_count"] > 0)]
+            st.markdown("**Newly unlocked patterns (vs. current):**")
+            st.dataframe(unlocked[["fly_name", "type", "species"]].sort_values(["type", "fly_name"]), use_container_width=True)
+            st.download_button(
+                "⬇️ Download what-if unlocked list (CSV)",
+                unlocked[["fly_name", "type", "species"]].to_csv(index=False).encode("utf-8"),
+                file_name="what_if_unlocked.csv",
+                mime="text/csv",
+            )
+
+    # =============================
+    # Export bundle
+    # =============================
+    st.markdown("---")
+    st.subheader("⬇️ Download everything (ZIP bundle)")
+
+    if st.button("Build ZIP bundle"):
+        hooks_catalog = load_hooks_catalog("data/hooks_catalog.csv")
+        brand_prefs = load_brand_prefs("data/brand_prefs.csv")
+        singles_all = enrich_buy_suggestions(best_single_buys(matches_df), prefer_brands, hooks_catalog, brand_prefs, hook_map)
+        pairs_all = best_pair_buys(matches_df)
+        shopping_all = enrich_buy_suggestions(
+            make_shopping_list(matches_df, max_missing=near_miss_cap), prefer_brands, hooks_catalog, brand_prefs, hook_map
+        )
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("matches.csv", matches_df.to_csv(index=False))
+            z.writestr("best_single_buys_enriched.csv", singles_all.to_csv(index=False))
+            z.writestr("best_pair_buys.csv", pairs_all.to_csv(index=False))
+            z.writestr("shopping_list_enriched.csv", shopping_all.to_csv(index=False))
+            inv_full_df_from_step3 = locals().get("inv_full_df_from_step3", None)
+            if inv_full_df_from_step3 is not None:
+                z.writestr("inventory_step3.csv", inv_full_df_from_step3.to_csv(index=False))
+            if not st.session_state.inventory_df.empty:
+                z.writestr("inventory_editor.csv", st.session_state.inventory_df.to_csv(index=False))
+            z.writestr("flies.csv", flies_df.to_csv(index=False))
+            opts = {
+                "use_subs": bool(locals().get("use_subs", True)),
+                "ignore_labels": bool(locals().get("ignore_labels", True)),
+                "ignore_color": bool(locals().get("ignore_color", True)),
+                "size_tol": int(locals().get("size_tol", 2)),
+                "require_len": bool(locals().get("require_len", False)),
+                "near_miss_cap": int(near_miss_cap),
+                "type_filter": types,
+                "species_filter": species_all,
+            }
+            z.writestr("options.json", pd.Series(opts, dtype=object).to_json())
+
+        st.download_button(
+            "⬇️ Download ZIP bundle", data=buf.getvalue(), file_name="fly_tying_recommender_bundle.zip", mime="application/zip"
+        )
+
+    def log_event(name: str, payload: dict):
+        if DB is None:
+            return
+        try:
+            ev = {"name": name, "ts": pd.Timestamp.utcnow().isoformat(), **payload}
+            DB.collection("events").add(ev)
+        except Exception as e:
+            st.warning(f"Analytics not saved: {e}")
+
+    # right after matches_df is computed and Summary metrics are calculated:
+    log_event(
+        "run_matching",
+        {
+            "acct": st.session_state.get("account_id", ""),
+            "inventory_source": inv_source,
+            "inv_count": len(inv_tokens),
+            "can_tie": int((matches_df["missing_count"] == 0).sum()),
+            "miss1": int((matches_df["missing_count"] == 1).sum()),
+            "miss2": int((matches_df["missing_count"] == 2).sum()),
+            "size_tol": size_tol,
+            "ignore_labels": ignore_labels,
+            "ignore_color": ignore_color,
+            "prefer_brands": prefer_brands,
+            "src": st.query_params.get("src", ""),
+        },
     )
-
-def log_event(name: str, payload: dict):
-    if DB is None:
-        return
-    try:
-        ev = {"name": name, "ts": pd.Timestamp.utcnow().isoformat(), **payload}
-        DB.collection("events").add(ev)
-    except Exception as e:
-        st.warning(f"Analytics not saved: {e}")
-
-# right after matches_df is computed and Summary metrics are calculated:
-log_event(
-    "run_matching",
-    {
-        "acct": st.session_state.get("account_id", ""),
-        "inventory_source": inv_source,
-        "inv_count": len(inv_tokens),
-        "can_tie": int((matches_df["missing_count"] == 0).sum()),
-        "miss1": int((matches_df["missing_count"] == 1).sum()),
-        "miss2": int((matches_df["missing_count"] == 2).sum()),
-        "size_tol": size_tol,
-        "ignore_labels": ignore_labels,
-        "ignore_color": ignore_color,
-        "prefer_brands": prefer_brands,
-        "src": st.query_params.get("src", ""),
-    },
-)
+else:
+    st.info("Click **Run matching** to see your results.")
