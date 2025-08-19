@@ -9,6 +9,7 @@
       #google { padding: 10px 16px; background: #4285f4; color: #fff; border: 0; border-radius: 6px; cursor: pointer; }
       #status { margin-top: 12px; color: #444; }
       #errors { margin-top: 8px; color: #c0392b; white-space: pre-wrap; }
+      small { color: #666; }
     </style>
   </head>
   <body>
@@ -16,6 +17,7 @@
     <button id="google">Sign in with Google</button>
     <div id="status">Ready.</div>
     <div id="errors"></div>
+    <small id="close-hint" style="display:none;">You can close this window.</small>
 
     <script type="module">
       import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
@@ -27,8 +29,9 @@
         getRedirectResult,
       } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 
-      const urlParams = new URLSearchParams(window.location.search);
-      const isPopup = urlParams.get('popup') === 'true';
+      // --- Query params / config
+      const qs = new URLSearchParams(window.location.search);
+      const isPopup = qs.get("popup") === "true";
 
       const firebaseConfig = {
         apiKey: "AIzaSyA_dlivqpvqiYQVp0AC-yF1ZTkDSjIxVuE",
@@ -36,66 +39,91 @@
         projectId: "whattoflie",
       };
 
-      // Where to send the token after auth
-      // Default: your Streamlit Cloud app.
-      // You can override via ?return_to=<absolute URL>
-      const qs = new URLSearchParams(window.location.search);
+      // Where to send the user in non-popup mode
       const defaultReturnTo = "https://whattoflie.streamlit.app/";
       const returnTo = qs.get("return_to") || defaultReturnTo;
 
+      // Parent origin for postMessage; prefer referrer, fallback to returnTo origin
+      const parentOrigin = (() => {
+        try {
+          if (document.referrer) return new URL(document.referrer).origin;
+        } catch {}
+        try {
+          return new URL(returnTo).origin;
+        } catch {}
+        return "*"; // last-resort; opener will still verify e.origin
+      })();
+
+      // --- DOM
+      const statusEl = document.getElementById("status");
+      const errorsEl = document.getElementById("errors");
+      const closeHintEl = document.getElementById("close-hint");
+      const btn = document.getElementById("google");
+
+      // --- Firebase
       const app = initializeApp(firebaseConfig);
       const auth = getAuth(app);
       const provider = new GoogleAuthProvider();
-          if (isPopup) {
-    // Send message to parent window
-    window.opener.postMessage({
-        type: 'auth_success',
-        token: token,
-        uid: result.user.uid,
-        email: result.user.email
-    }, '*');
-} else {
-    // Regular redirect
-    window.location = returnTo + '?token=' + token + '&uid=' + uid + '&email=' + email;
-}
-      // If we just returned from a redirect flow, handle it
-      try {
-        getRedirectResult(auth)
-          .then(async (res) => {
-            if (res && res.user) {
-              statusEl.textContent = "Signed in via redirect. Finishing…";
-              const token = await res.user.getIdToken();
-              const target = new URL(returnTo);
-              target.searchParams.set("token", token);
-              target.searchParams.set("uid", res.user.uid);
-              target.searchParams.set("email", encodeURIComponent(res.user.email || ""));
-              window.location = target.toString();
-            }
-          })
-          .catch((err) => {
-            console.error("getRedirectResult error:", err);
-          });
-      } catch (e) {
-        console.warn("getRedirectResult not available:", e);
+      // Optional: force account chooser each time
+      // provider.setCustomParameters({ prompt: "select_account" });
+
+      // Helper: deliver token either to opener (popup flow) or via redirect
+      async function deliverAuthResult(user) {
+        const token = await user.getIdToken();
+        const uid = user.uid;
+        const email = user.email || "";
+
+        if (isPopup && window.opener) {
+          // Send token to opener and close
+          try {
+            window.opener.postMessage(
+              { type: "auth_success", token, uid, email },
+              parentOrigin
+            );
+          } catch (e) {
+            // Fallback if strict origin fails
+            window.opener.postMessage({ type: "auth_success", token, uid, email }, "*");
+          }
+          statusEl.textContent = "Signed in. Returning to app…";
+          closeHintEl.style.display = "inline";
+          // Give the opener a moment to process before closing
+          setTimeout(() => { window.close(); }, 150);
+        } else {
+          // Non-popup: redirect back with token in URL (legacy flow)
+          const target = new URL(returnTo);
+          target.searchParams.set("token", token);
+          target.searchParams.set("uid", uid);
+          target.searchParams.set("email", encodeURIComponent(email));
+          window.location = target.toString();
+        }
       }
 
-      document.getElementById("google").onclick = async () => {
+      // Handle redirect-complete if we came back via signInWithRedirect
+      (async () => {
+        try {
+          const res = await getRedirectResult(auth);
+          if (res && res.user) {
+            statusEl.textContent = "Signed in via redirect. Finishing…";
+            await deliverAuthResult(res.user);
+          }
+        } catch (err) {
+          console.error("getRedirectResult error:", err);
+        }
+      })();
+
+      // Main button flow: try popup, fall back to redirect if needed
+      btn.onclick = async () => {
         errorsEl.textContent = "";
         statusEl.textContent = "Opening Google sign-in…";
         try {
           const result = await signInWithPopup(auth, provider);
           statusEl.textContent = "Sign-in successful. Exchanging token…";
-          const token = await result.user.getIdToken();
-          const target = new URL(returnTo);
-          target.searchParams.set("token", token);
-          target.searchParams.set("uid", result.user.uid);
-          target.searchParams.set("email", encodeURIComponent(result.user.email || ""));
-          window.location = target.toString();
+          await deliverAuthResult(result.user);
         } catch (e) {
           console.error("Popup auth error:", e);
-          // Common: unauthorized domain or popup blocked; fall back to redirect
-          if (e?.code === "auth/unauthorized-domain" || e?.code === "auth/popup-blocked") {
-            statusEl.textContent = "Falling back to redirect…";
+          // Common: unauthorized domain, popup blocked, or user closed the chooser
+          if (e?.code === "auth/popup-blocked" || e?.code === "auth/unauthorized-domain") {
+            statusEl.textContent = "Popup blocked or domain not authorized. Using redirect…";
             try {
               await signInWithRedirect(auth, provider);
             } catch (e2) {
@@ -106,6 +134,8 @@
                 `or add ${location.hostname} under Firebase Auth → Settings → Authorized domains.`;
               statusEl.textContent = "Sign-in failed.";
             }
+          } else if (e?.code === "auth/popup-closed-by-user" || e?.code === "auth/cancelled-popup-request") {
+            statusEl.textContent = "Popup closed before completing sign-in.";
           } else {
             errorsEl.textContent = `${e?.code || ""} ${e?.message || e}`;
             statusEl.textContent = "Sign-in failed.";

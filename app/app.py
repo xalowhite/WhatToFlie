@@ -28,9 +28,6 @@ st.write(f"DEBUG: Page load count: {st.session_state['page_loads']}")
 st.write(f"DEBUG: Has token in URL: {'token' in st.query_params}")
 st.write(f"DEBUG: Already authenticated: {bool(st.session_state.get('firebase_uid'))}")
 
-APP_BUILD = "debug-v3"
-st.caption(f"Build: {APP_BUILD}")
-
 @st.cache_data
 def gh_url(path: str) -> str | None:
     """Build a Raw GitHub URL from .streamlit/secrets.toml [github].raw_base or env GITHUB_RAW_BASE."""
