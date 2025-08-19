@@ -85,57 +85,25 @@ FIREBASE_WEB_CONFIG = dict(st.secrets.get("firebase_web", {})) or {
 # Improved Google Sign-In
 # =============================
 def render_google_login_popup():
-    """Open login in popup to avoid redirects"""
+    """Use full-page redirect (sandboxed iframe can't keep window.opener)."""
     login_url = "https://whattoflie.web.app/login.html"
 
     components.html(
         f"""
         <script>
         (function() {{
-          function openLoginPopup() {{
+          function goLogin() {{
             const base = window.top.location.origin + window.top.location.pathname;
-            const parentOrigin = window.top.location.origin;
-
             const url = new URL('{login_url}');
-            url.searchParams.set('popup', 'true');
-            url.searchParams.set('return_to', base);
-            url.searchParams.set('parent_origin', parentOrigin);
-
-            // IMPORTANT: keep opener (noopener=no, noreferrer=no)
-            const popup = window.open(
-              url.toString(),
-              'GoogleLogin',
-              'width=500,height=600,noopener=no,noreferrer=no'
-            );
-
-            // Listen for messages from popup
-            window.addEventListener('message', function(e) {{
-              // Accept your Firebase Hosting origins (add more if needed)
-              const allowed = new Set([
-                'https://whattoflie.web.app',
-                'https://whattoflie.firebaseapp.com'
-              ]);
-              if (!allowed.has(e.origin)) return;
-
-              if (e.data && e.data.type === 'auth_success') {{
-                try {{ popup && popup.close(); }} catch (_e) {{}}
-
-                // Navigate the TOP window (not just this iframe)
-                const target = new URL(base);
-                target.searchParams.set('token', e.data.token);
-                target.searchParams.set('uid', e.data.uid);
-                target.searchParams.set('email', e.data.email);
-                window.top.location.href = target.toString();
-              }}
-            }});
+            url.searchParams.set('popup', 'false');   // force non-popup mode
+            url.searchParams.set('return_to', base);  // where login.html should send us back
+            window.top.location.href = url.toString();
           }}
-
-          // expose for button onclick
-          window.openLoginPopup = openLoginPopup;
+          window.goLogin = goLogin;
         }})();
         </script>
 
-        <button onclick="openLoginPopup()" style="
+        <button onclick="goLogin()" style="
             padding: 12px 24px;
             background: #4285f4;
             color: white;
@@ -144,11 +112,12 @@ def render_google_login_popup():
             cursor: pointer;
             font-size: 16px;
         ">
-            🔑 Sign in with Google (Popup)
+            🔑 Sign in with Google
         </button>
         """,
         height=60
     )
+
 
 
 # =============================
