@@ -191,7 +191,6 @@ if st.session_state.get("firebase_uid"):
     handle_logout()  # This now handles the button internally
 else:
     st.info("🔑 Please sign in to sync your data across devices")
-    render_google_login_button()
 
 # Debug current URL params
 if st.query_params:
