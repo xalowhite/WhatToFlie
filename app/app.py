@@ -1379,34 +1379,34 @@ with cB:
 if DB is not None and st.session_state.get("account_id") and not st.session_state.get("did_auto_load"):
 
 # AFTER (fixed):
-if DB is not None and st.session_state.get("account_id") and not st.session_state.get("did_auto_load"):
-    try:
-        df_cloud = load_user_inventory(st.session_state["account_id"])
-        if isinstance(df_cloud, pd.DataFrame) and not df_cloud.empty:
-            expected = ["material", "status", "brand", "model"]
-            for col in expected:
-                if col not in df_cloud.columns:
-                    df_cloud[col] = ""
-            st.session_state.inventory_df = df_cloud[expected].fillna("").drop_duplicates().reset_index(drop=True)
+    if DB is not None and st.session_state.get("account_id") and not st.session_state.get("did_auto_load"):
+        try:
+            df_cloud = load_user_inventory(st.session_state["account_id"])
+            if isinstance(df_cloud, pd.DataFrame) and not df_cloud.empty:
+                expected = ["material", "status", "brand", "model"]
+                for col in expected:
+                    if col not in df_cloud.columns:
+                        df_cloud[col] = ""
+                st.session_state.inventory_df = df_cloud[expected].fillna("").drop_duplicates().reset_index(drop=True)
 
-        prefs = load_user_prefs(st.session_state["account_id"])
-        if prefs:
-            for k in ["pref_use_subs","pref_ignore_labels","pref_ignore_color","pref_size_tol","pref_require_len","pref_prefer_brands"]:
-                if k in prefs:
-                    st.session_state[k] = prefs[k]
-            if "aliases_map" in prefs and isinstance(prefs["aliases_map"], dict):
-                aliases_map.update({str(k): str(v) for k, v in prefs["aliases_map"].items()})
-            if "subs_map" in prefs and isinstance(prefs["subs_map"], dict):
-                subs_map.clear()
-                for b, eqs in prefs["subs_map"].items():
-                    subs_map[str(b)] = set(str(e) for e in (eqs or []))
-            if "brand_prefs" in prefs and isinstance(prefs["brand_prefs"], dict):
-                brand_prefs.update(prefs["brand_prefs"])
+            prefs = load_user_prefs(st.session_state["account_id"])
+            if prefs:
+                for k in ["pref_use_subs","pref_ignore_labels","pref_ignore_color","pref_size_tol","pref_require_len","pref_prefer_brands"]:
+                    if k in prefs:
+                        st.session_state[k] = prefs[k]
+                if "aliases_map" in prefs and isinstance(prefs["aliases_map"], dict):
+                    aliases_map.update({str(k): str(v) for k, v in prefs["aliases_map"].items()})
+                if "subs_map" in prefs and isinstance(prefs["subs_map"], dict):
+                    subs_map.clear()
+                    for b, eqs in prefs["subs_map"].items():
+                        subs_map[str(b)] = set(str(e) for e in (eqs or []))
+                if "brand_prefs" in prefs and isinstance(prefs["brand_prefs"], dict):
+                    brand_prefs.update(prefs["brand_prefs"])
 
-        st.session_state["did_auto_load"] = True
-        st.rerun()
-    except Exception as e:
-        st.warning(f"Auto-load failed: {e}")
+            st.session_state["did_auto_load"] = True
+            st.rerun()
+        except Exception as e:
+            st.warning(f"Auto-load failed: {e}")
 
 # Also find and replace all other DB references with safety checks:
 
