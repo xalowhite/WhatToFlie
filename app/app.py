@@ -85,16 +85,15 @@ FIREBASE_WEB_CONFIG = dict(st.secrets.get("firebase_web", {})) or {
 # Improved Google Sign-In
 # =============================
 def render_google_login_popup():
-    # Single, reliable button that navigates the WHOLE page (no iframe JS)
     login_url = "https://whattoflie.web.app/login.html"
-    # If you also run locally, you can branch this:
-    return_to = "https://whattoflie.streamlit.app/"  # prod app base URL
-
-    st.link_button(
-        "🔑 Sign in with Google",
-        f"{login_url}?popup=false&return_to={return_to}",
-        help="Redirect to Google sign-in, then back here.",
+    return_to = "https://whattoflie.streamlit.app/"
+    st.markdown(
+        f'<a href="{login_url}?popup=false&return_to={return_to}" target="_self">'
+        f'<button class="css-1emrehy edgvbvh10">🔑 Sign in with Google</button>'
+        f'</a>',
+        unsafe_allow_html=True,
     )
+
 
 
 
