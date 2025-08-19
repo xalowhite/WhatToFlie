@@ -15,6 +15,9 @@ import requests
 # =============================
 st.set_page_config(page_title="🪶 Fly Tying Recommender", page_icon="🪶", layout="wide")
 
+APP_BUILD = "tabs-fix-v2"
+st.caption(f"Build: {APP_BUILD}")
+
 # =============================
 # Optional: Access gate for private beta
 # =============================
@@ -1261,14 +1264,13 @@ tab1, tab2, tab3, tabN, tab4, tab5, tabW = st.tabs([
     "🧪 What-if"
 ])
 
-
-with _tab1:
+with tab1:
     df = apply_filters(matches_df[matches_df["missing_count"] == 0])
     st.dataframe(df, use_container_width=True)
     if df.empty:
         st.info("No results here with the current filters. Try widening Type/Species or raising the near-miss threshold.")
 
-with _tab2:
+with tab2:
     df = apply_filters(matches_df[matches_df["missing_count"] == 1])
     st.dataframe(df, use_container_width=True)
     if df.empty:
@@ -1304,7 +1306,7 @@ with _tab2:
         added = add_items_to_editor(sel_add_1)
         st.success(f"Added {added} item(s) to the editor.")
 
-with _tab3:
+with tab3:
     df = apply_filters(matches_df[matches_df["missing_count"] == 2])
     st.dataframe(df, use_container_width=True)
     if df.empty:
@@ -1340,13 +1342,13 @@ with _tab3:
         added = add_items_to_editor(sel_add_2)
         st.success(f"Added {added} item(s) to the editor.")
 
-with _tabN:
+with tabN:
     df = apply_filters(matches_df[matches_df["missing_count"] <= near_miss_cap])
     st.dataframe(df.sort_values(["missing_count", "required_count", "fly_name"]), use_container_width=True)
     if df.empty:
         st.info("No results here with the current filters. Try widening Type/Species or raising the near-miss threshold.")
 
-with _tab4:
+with tab4:
     singles = best_single_buys(matches_df)
     try:
         hooks_catalog = read_csv_from_github("data/hooks_catalog.csv")
@@ -1421,7 +1423,7 @@ with _tab4:
             unsafe_allow_html=True
         )
 
-with _tab5:
+with tab5:
     st.markdown("**Inventory from Step 3 (upload/paste/sample):**")
     inv_full_df_from_step3 = locals().get("inv_full_df_from_step3", None)
     def status_badge(s: str) -> str:
@@ -1474,7 +1476,7 @@ with _tab5:
         else:
             st.success("No obvious anomalies found in your inventory 🎉")
 
-with _tabW:
+with tabW:
     st.markdown("Try adding prospective buys to your inventory and preview what unlocks.")
     base_shop_df = make_shopping_list(matches_df, max_missing=near_miss_cap)
     base_items = base_shop_df["material"].tolist() if not base_shop_df.empty else []
@@ -1511,6 +1513,7 @@ with _tabW:
             file_name="what_if_unlocked.csv",
             mime="text/csv"
         )
+
 
 # =============================
 # Export bundle
