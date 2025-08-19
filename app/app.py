@@ -1,5 +1,3 @@
-# app.py
-
 import streamlit as st
 import pandas as pd
 import os
@@ -14,6 +12,14 @@ from urllib.error import URLError
 import requests
 import streamlit.components.v1 as components
 
+# =============================
+# App meta (MUST BE FIRST)
+# =============================
+st.set_page_config(page_title="🪶 Fly Tying Recommender", page_icon="🪶", layout="wide")
+
+APP_BUILD = "debug-v3"
+st.caption(f"Build: {APP_BUILD}")
+
 if "page_loads" not in st.session_state:
     st.session_state["page_loads"] = 0
 st.session_state["page_loads"] += 1
@@ -21,6 +27,7 @@ st.session_state["page_loads"] += 1
 st.write(f"DEBUG: Page load count: {st.session_state['page_loads']}")
 st.write(f"DEBUG: Has token in URL: {'token' in st.query_params}")
 st.write(f"DEBUG: Already authenticated: {bool(st.session_state.get('firebase_uid'))}")
+
 
 # =============================
 # App meta (MUST BE FIRST)
@@ -1171,7 +1178,7 @@ def save_user_inventory(inv_df: pd.DataFrame) -> bool:
         st.error("You must be logged in to save.")
         return False
     try:
-        doc_id = st.session_state.firebase_uid
+        doc_id = st.session_state["firebase_uid"]
         DB.collection("users").document(doc_id).collection("app").document("inventory").set(
             {"rows": inv_df.to_dict(orient="records")}, merge=True
         )
@@ -1184,12 +1191,13 @@ def load_user_inventory() -> pd.DataFrame | None:
     if DB is None or not st.session_state.get("firebase_uid"):
         return None
     try:
-        doc_id = st.session_state.firebase_uid
+        doc_id = st.session_state["firebase_uid"]
         doc = DB.collection("users").document(doc_id).collection("app").document("inventory").get()
-        return pd.DataFrame(doc.to_dict().get("rows",)) if doc.exists else None
+        return pd.DataFrame(doc.to_dict().get("rows", [])) if doc.exists else None
     except Exception as e:
         st.error(f"Failed to load inventory: {e}")
         return None
+
 
 def save_user_prefs(user_id: str, prefs: dict) -> bool:
     if DB is None:
@@ -1436,12 +1444,39 @@ if run_now:
     # Clear any old simulation results
     st.session_state.matches_sim = None
 
+def add_items_to_editor(items: list[str]) -> int:
+    """Add normalized 'NEW' items to the in-app inventory editor, skipping duplicates."""
+    if not items:
+        return 0
+    base = st.session_state.get(
+        "inventory_df", pd.DataFrame(columns=["material", "status", "brand", "model"])
+    ).copy()
+
+    new_rows = []
+    for raw in items:
+        tok = normalize(raw)
+        if not tok:
+            continue
+        # Skip if already present
+        if not base.empty and (base["material"].astype(str).str.lower() == tok).any():
+            continue
+        mat, brand, model = normalize_inventory_entry(tok, "", "")
+        new_rows.append({"material": mat, "status": "NEW", "brand": brand, "model": model})
+
+    if new_rows:
+        st.session_state.inventory_df = (
+            pd.concat([base, pd.DataFrame(new_rows)], ignore_index=True)
+            .drop_duplicates()
+            .reset_index(drop=True)
+        )
+        return len(new_rows)
+    return 0
 
 # =============================
 # Results & tools (Display Logic)
 # =============================
 if st.session_state.matches_df is not None:
-    matches_df = st.session_state.matches_df # Use the stored results
+    matches_df = st.session_state.matches_df  # Use the stored results
 
     st.subheader("Summary")
     c1, c2, c3 = st.columns(3)
@@ -1465,7 +1500,8 @@ if st.session_state.matches_df is not None:
 
     fly_query = st.text_input("🔎 Search by fly name", "", placeholder="e.g. elk hair, pheasant tail, zonker...")
     near_miss_cap = st.slider(
-        "Near-miss threshold (≤ this many missing)", 2, 6, 3, help="Show and aggregate flies that are within this many missing materials."
+        "Near-miss threshold (≤ this many missing)", 2, 6, 3,
+        help="Show and aggregate flies that are within this many missing materials."
     )
 
     def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
@@ -1480,91 +1516,58 @@ if st.session_state.matches_df is not None:
 
     # Tabs
     tab1, tab2, tab3, tabN, tab4, tab5, tabW = st.tabs(
-
+        ["✅ Tie now", "🟡 Missing 1", "🟠 Missing 2", f"≤{near_miss_cap} Missing", "🛒 Buy suggestions", "📦 Inventory", "🔮 What-if"]
     )
 
+    # --- Tab: Can tie now
     with tab1:
         df = apply_filters(matches_df[matches_df["missing_count"] == 0])
         st.dataframe(df, use_container_width=True)
         if df.empty:
             st.info("No results here with the current filters. Try widening Type/Species or raising the near-miss threshold.")
 
+    # --- Tab: Missing 1
     with tab2:
         df = apply_filters(matches_df[matches_df["missing_count"] == 1])
         st.dataframe(df, use_container_width=True)
         if df.empty:
             st.info("No results here with the current filters. Try widening Type/Species or raising the near-miss threshold.")
-        miss_pool_1 =
+
+        miss_pool_1 = []
         for cell in df["missing"].dropna():
             miss_pool_1.extend([x.strip() for x in str(cell).split(";") if x.strip()])
         miss_opts_1 = sorted(set(miss_pool_1))
         sel_add_1 = st.multiselect("➕ Add these missing items to the Inventory Editor", miss_opts_1, key="add_miss1")
-        if st.button("Add selected to Editor", key="btn_add_miss1"):
-            def add_items_to_editor(items: list[str]) -> int:
-                if not items:
-                    return 0
-                base = st.session_state.get("inventory_df", pd.DataFrame(columns=["material", "status", "brand", "model"]))
-                base = base.copy()
-                new_rows =
-                for raw in items:
-                    tok = normalize(raw)
-                    if not tok:
-                        continue
-                    if not base.empty and (base["material"].astype(str).str.lower() == tok).any():
-                        continue
-                    mat, brand, model = normalize_inventory_entry(tok, "", "")
-                    new_rows.append({"material": mat, "status": "NEW", "brand": brand, "model": model})
-                if new_rows:
-                    st.session_state.inventory_df = (
-                        pd.concat(, ignore_index=True).drop_duplicates().reset_index(drop=True)
-                    )
-                    return len(new_rows)
-                return 0
 
+        if st.button("Add selected to Editor", key="btn_add_miss1"):
             added = add_items_to_editor(sel_add_1)
             st.success(f"Added {added} item(s) to the editor.")
 
+    # --- Tab: Missing 2
     with tab3:
         df = apply_filters(matches_df[matches_df["missing_count"] == 2])
         st.dataframe(df, use_container_width=True)
         if df.empty:
             st.info("No results here with the current filters. Try widening Type/Species or raising the near-miss threshold.")
-        miss_pool_2 =
+
+        miss_pool_2 = []
         for cell in df["missing"].dropna():
             miss_pool_2.extend([x.strip() for x in str(cell).split(";") if x.strip()])
         miss_opts_2 = sorted(set(miss_pool_2))
         sel_add_2 = st.multiselect("➕ Add these missing items to the Inventory Editor", miss_opts_2, key="add_miss2")
-        if st.button("Add selected to Editor", key="btn_add_miss2"):
-            def add_items_to_editor(items: list[str]) -> int:
-                if not items:
-                    return 0
-                base = st.session_state.get("inventory_df", pd.DataFrame(columns=["material", "status", "brand", "model"]))
-                base = base.copy()
-                new_rows =
-                for raw in items:
-                    tok = normalize(raw)
-                    if not tok:
-                        continue
-                    if not base.empty and (base["material"].astype(str).str.lower() == tok).any():
-                        continue
-                    mat, brand, model = normalize_inventory_entry(tok, "", "")
-                    new_rows.append({"material": mat, "status": "NEW", "brand": brand, "model": model})
-                if new_rows:
-                    st.session_state.inventory_df = (
-                        pd.concat(, ignore_index=True).drop_duplicates().reset_index(drop=True)
-                    )
-                    return len(new_rows)
-                return 0
 
+        if st.button("Add selected to Editor", key="btn_add_miss2"):
             added = add_items_to_editor(sel_add_2)
             st.success(f"Added {added} item(s) to the editor.")
 
+    # --- Tab: ≤ N missing (Near misses)
     with tabN:
         df = apply_filters(matches_df[matches_df["missing_count"] <= near_miss_cap])
         st.dataframe(df.sort_values(["missing_count", "required_count", "fly_name"]), use_container_width=True)
         if df.empty:
             st.info("No results here with the current filters. Try widening Type/Species or raising the near-miss threshold.")
 
+    # --- Tab: Buy suggestions
     with tab4:
         singles = best_single_buys(matches_df)
         try:
@@ -1620,7 +1623,7 @@ if st.session_state.matches_df is not None:
         )
 
         if not shopping_df.empty:
-            lines =
+            lines = []
             for _, r in shopping_df.iterrows():
                 line = f"- {r.get('material','')}"
                 if prefer_brands and str(r.get("suggested_brand", "")).strip():
@@ -1641,6 +1644,7 @@ if st.session_state.matches_df is not None:
                 unsafe_allow_html=True,
             )
 
+    # --- Tab: Inventory view & QA
     with tab5:
         st.markdown("**Inventory from Step 3 (upload/paste/sample):**")
         inv_full_df_from_step3 = locals().get("inv_full_df_from_step3", None)
@@ -1688,7 +1692,7 @@ if st.session_state.matches_df is not None:
 
             known_tokens = derive_known_material_tokens(flies_df, aliases_map, subs_map)
 
-            suspicious =
+            suspicious = []
             for t in sorted(inv_all_tokens):
                 if t.startswith("hook:"):
                     continue
@@ -1701,24 +1705,46 @@ if st.session_state.matches_df is not None:
             else:
                 st.success("No obvious anomalies found in your inventory 🎉")
 
+    # --- Tab: What-if simulator
     with tabW:
         st.markdown("Try adding prospective buys to your inventory and preview what unlocks.")
         base_shop_df = make_shopping_list(matches_df, max_missing=near_miss_cap)
-        base_items = base_shop_df["material"].tolist() if not base_shop_df.empty else
+        base_items = base_shop_df["material"].tolist() if not base_shop_df.empty else []
         pick = st.multiselect(
             "Select items to hypothetically add",
             base_items,
             help="Start with the shopping list; you can also type free-form entries below.",
         )
         extra_freeform = st.text_area(
-            "Optional free-form additions (one per line)", height=100, placeholder="hook: nymph #16\ndry dubbing olive\nkrystal flash pearl"
+            "Optional free-form additions (one per line)", height=100,
+            placeholder="hook: nymph #16\ndry dubbing olive\nkrystal flash pearl"
         )
         extra_tokens = [normalize(x) for x in extra_freeform.splitlines() if x.strip()]
+
+        # Rebuild current inv_tokens if needed (e.g., page reloaded with stored matches)
+        if "inv_tokens" in locals():
+            current_inv_tokens = inv_tokens
+        else:
+            inv_tokens_step3 = locals().get("inv_tokens_from_step3", set())
+            inv_editor_df = st.session_state.get(
+                "inventory_df", pd.DataFrame(columns=["material", "status", "brand", "model"])
+            )
+            if not inv_editor_df.empty:
+                present_mask_editor = inv_editor_df.get("status", "").astype(str).str.upper().ne("OUT")
+                inv_tokens_editor = set(inv_editor_df.loc[present_mask_editor, "material"].dropna().map(normalize).tolist())
+            else:
+                inv_tokens_editor = set()
+            if inv_source == "Step 3 upload/paste/sample":
+                current_inv_tokens = inv_tokens_step3
+            elif inv_source == "Inventory Editor (session)":
+                current_inv_tokens = inv_tokens_editor
+            else:
+                current_inv_tokens = inv_tokens_step3.union(inv_tokens_editor)
 
         simulate_btn = st.button("Run what-if simulation")
 
         if simulate_btn:
-            hypothetical_inv = set(inv_tokens).union(set(pick)).union(set(extra_tokens))
+            hypothetical_inv = set(current_inv_tokens).union(set(pick)).union(set(extra_tokens))
             matches_sim = compute_matches(
                 flies_df=flies_df,
                 inv_tokens=hypothetical_inv,
@@ -1732,17 +1758,20 @@ if st.session_state.matches_df is not None:
                 size_tolerance=size_tol,
                 require_length_match=require_len,
             )
-            st.session_state.matches_sim = matches_sim # Store simulation results
+            st.session_state.matches_sim = matches_sim  # Store simulation results
 
         if st.session_state.matches_sim is not None:
-            matches_sim = st.session_state.matches_sim # Use stored simulation results
+            matches_sim = st.session_state.matches_sim  # Use stored simulation results
             cA, cB, cC = st.columns(3)
             cA.metric("✅ Can tie now (what-if)", int((matches_sim["missing_count"] == 0).sum()))
             cB.metric("🟡 Missing 1 (what-if)", int((matches_sim["missing_count"] == 1).sum()))
             cC.metric("🟠 Missing 2 (what-if)", int((matches_sim["missing_count"] == 2).sum()))
             unlocked = matches_sim[(matches_sim["missing_count"] == 0) & (matches_df["missing_count"] > 0)]
             st.markdown("**Newly unlocked patterns (vs. current):**")
-            st.dataframe(unlocked[["fly_name", "type", "species"]].sort_values(["type", "fly_name"]), use_container_width=True)
+            st.dataframe(
+                unlocked[["fly_name", "type", "species"]].sort_values(["type", "fly_name"]),
+                use_container_width=True
+            )
             st.download_button(
                 "⬇️ Download what-if unlocked list (CSV)",
                 unlocked[["fly_name", "type", "species"]].to_csv(index=False).encode("utf-8"),
@@ -1790,7 +1819,8 @@ if st.session_state.matches_df is not None:
             z.writestr("options.json", pd.Series(opts, dtype=object).to_json())
 
         st.download_button(
-            "⬇️ Download ZIP bundle", data=buf.getvalue(), file_name="fly_tying_recommender_bundle.zip", mime="application/zip"
+            "⬇️ Download ZIP bundle", data=buf.getvalue(),
+            file_name="fly_tying_recommender_bundle.zip", mime="application/zip"
         )
 
     def log_event(name: str, payload: dict):
@@ -1802,22 +1832,24 @@ if st.session_state.matches_df is not None:
         except Exception as e:
             st.warning(f"Analytics not saved: {e}")
 
-    # right after matches_df is computed and Summary metrics are calculated:
-    log_event(
-        "run_matching",
-        {
-            "acct": st.session_state.get("account_id", ""),
-            "inventory_source": inv_source,
-            "inv_count": len(inv_tokens),
-            "can_tie": int((matches_df["missing_count"] == 0).sum()),
-            "miss1": int((matches_df["missing_count"] == 1).sum()),
-            "miss2": int((matches_df["missing_count"] == 2).sum()),
-            "size_tol": size_tol,
-            "ignore_labels": ignore_labels,
-            "ignore_color": ignore_color,
-            "prefer_brands": prefer_brands,
-            "src": st.query_params.get("src", ""),
-        },
-    )
+    # Note: this runs only in the same execution path as matching; keep it here.
+    if "inv_tokens" in locals():
+        log_event(
+            "run_matching",
+            {
+                "acct": st.session_state.get("account_id", ""),
+                "inventory_source": inv_source,
+                "inv_count": len(inv_tokens),
+                "can_tie": int((matches_df["missing_count"] == 0).sum()),
+                "miss1": int((matches_df["missing_count"] == 1).sum()),
+                "miss2": int((matches_df["missing_count"] == 2).sum()),
+                "size_tol": size_tol,
+                "ignore_labels": ignore_labels,
+                "ignore_color": ignore_color,
+                "prefer_brands": prefer_brands,
+                "src": st.query_params.get("src", ""),
+            },
+        )
 else:
     st.info("Click **Run matching** to see your results.")
+
