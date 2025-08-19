@@ -87,14 +87,12 @@ FIREBASE_WEB_CONFIG = dict(st.secrets.get("firebase_web", {})) or {
 def render_google_login_popup():
     login_url = "https://whattoflie.web.app/login.html"
     return_to = "https://whattoflie.streamlit.app/"
-    st.markdown(
-        f'<a href="{login_url}?popup=false&return_to={return_to}" target="_self">'
-        f'<button class="css-1emrehy edgvbvh10">🔑 Sign in with Google</button>'
-        f'</a>',
-        unsafe_allow_html=True,
+    v = "4"  # bump when you redeploy
+    st.link_button(
+        "🔑 Sign in with Google",
+        f"{login_url}?v={v}&return_to={return_to}",
+        help="Redirect to Google sign-in, then back here.",
     )
-
-
 
 
 # =============================
