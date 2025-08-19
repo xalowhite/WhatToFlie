@@ -28,12 +28,6 @@ st.write(f"DEBUG: Page load count: {st.session_state['page_loads']}")
 st.write(f"DEBUG: Has token in URL: {'token' in st.query_params}")
 st.write(f"DEBUG: Already authenticated: {bool(st.session_state.get('firebase_uid'))}")
 
-
-# =============================
-# App meta (MUST BE FIRST)
-# =============================
-st.set_page_config(page_title="🪶 Fly Tying Recommender", page_icon="🪶", layout="wide")
-
 APP_BUILD = "debug-v3"
 st.caption(f"Build: {APP_BUILD}")
 
@@ -198,7 +192,8 @@ if st.session_state.get("firebase_uid"):
     handle_logout()  # This now handles the button internally
 else:
     st.info("🔑 Please sign in to sync your data across devices")
-
+    render_google_login_popup()
+    
 # Debug current URL params
 if st.query_params:
     with st.expander("Debug: URL Parameters"):
@@ -1472,6 +1467,11 @@ def add_items_to_editor(items: list[str]) -> int:
         return len(new_rows)
     return 0
 
+if st.button("🧹 Clear results / start fresh"):
+    st.session_state.matches_df = None
+    st.session_state.matches_sim = None
+    st.rerun()
+    
 # =============================
 # Results & tools (Display Logic)
 # =============================
