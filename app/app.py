@@ -5,7 +5,28 @@ from collections import Counter
 import itertools
 import io
 import zipfile
+import hashlib, hmac
+import json
+from urllib.error import URLError
+import requests
 
+# =============================
+# App meta
+# =============================
+st.set_page_config(page_title="🪶 Fly Tying Recommender", page_icon="🪶", layout="wide")
+
+# =============================
+# Optional: Access gate for private beta
+# =============================
+APP_PASSCODE = st.secrets.get("app_passcode", "")
+if APP_PASSCODE:
+    code = st.text_input("Access code", type="password")
+    if code != APP_PASSCODE:
+        st.stop()
+
+# =============================
+# Firebase (Firestore) init — safe/no-op if secrets not present
+# =============================
 try:
     import firebase_admin
     from firebase_admin import credentials, firestore
@@ -17,10 +38,11 @@ def init_firestore():
     if not _FIREBASE_AVAILABLE:
         return None
     try:
-        if "gcp_service_account" not in st.secrets:
+        svc = st.secrets.get("gcp_service_account")
+        if not svc:
             return None
         if not firebase_admin._apps:
-            cred = credentials.Certificate(dict(st.secrets["gcp_service_account"]))
+            cred = credentials.Certificate(dict(svc))
             firebase_admin.initialize_app(cred)
         return firestore.client()
     except Exception as e:
@@ -29,30 +51,15 @@ def init_firestore():
 
 DB = init_firestore()
 
+# =============================
+# Helpers — normalization, parsing, matching
+# =============================
 
-st.set_page_config(page_title="🪶 Fly Tying Recommender", page_icon="🪶", layout="wide")
-
-# ====== Session State Initialization (for the in-app inventory editor) ======
-if "inventory_df" not in st.session_state:
-    st.session_state.inventory_df = pd.DataFrame(columns=["material", "status", "brand", "model"])
-if "data_loaded" not in st.session_state:
-    st.session_state.data_loaded = False
-
-# ====== Hero ======
-st.markdown("""
-<div style="padding: 1.2rem; border-radius: 16px; background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); color: #e2e8f0; border: 1px solid #334155;">
-  <h1 style="margin: 0 0 .4rem 0; font-size: 1.8rem;">🪶 Fly Tying Recommender</h1>
-  <p style="margin: 0;">See what you can tie now, what you're 1–2 items away from, and what to buy next — with brand/model preferences for hooks.</p>
-</div>
-""", unsafe_allow_html=True)
-
-# ---------- Helpers ----------
 def normalize(token: str) -> str:
     if not isinstance(token, str):
         return ""
     t = token.strip().lower()
-    t = " ".join(t.split())
-    return t
+    return " ".join(t.split())
 
 def strip_label(token: str) -> str:
     if not isinstance(token, str):
@@ -102,9 +109,44 @@ def build_flies_df(raw: pd.DataFrame) -> pd.DataFrame:
     return df
 
 @st.cache_data
-def load_flies(path: str) -> pd.DataFrame:
+def load_flies_local(path: str) -> pd.DataFrame:
     raw = pd.read_csv(path, encoding="utf-8", engine="python")
     return build_flies_df(raw)
+
+# ---------- GitHub fetch
+
+def gh_url(path: str) -> str:
+    """Build a raw GitHub URL from secrets.
+    Looks for [github].raw_base, or top-level raw_base, or gcp_service_account.raw_base.
+    Expect a value like: https://raw.githubusercontent.com/user/repo/main
+    """
+    base = (st.secrets.get("github", {}) or {}).get("raw_base", "")
+    if not base:
+        base = st.secrets.get("raw_base", "") or (st.secrets.get("gcp_service_account", {}) or {}).get("raw_base", "")
+    return f"{base.rstrip('/')}/{path.lstrip('/')}"
+
+@st.cache_data
+def read_csv_from_github(path: str, *, sep=",") -> pd.DataFrame:
+    url = gh_url(path)
+    if not url or not url.startswith("http"):
+        raise FileNotFoundError("GitHub raw_base not configured in secrets. Add [github].raw_base pointing to raw.githubusercontent.com.")
+    try:
+        return pd.read_csv(url, encoding="utf-8", sep=sep)
+    except Exception as e:
+        raise FileNotFoundError(f"GitHub file not found or unreadable: {url}\n{e}")
+
+@st.cache_data
+def fetch_bytes_from_github(path: str) -> bytes | None:
+    url = gh_url(path)
+    try:
+        r = requests.get(url, timeout=10)
+        if r.ok:
+            return r.content
+    except Exception:
+        pass
+    return None
+
+# ---------- Other cached loaders
 
 @st.cache_data
 def load_subs(path: str) -> dict[str, set[str]]:
@@ -140,15 +182,6 @@ def load_aliases(path: str) -> dict[str, str]:
         pass
     return d
 
-def apply_alias(token: str, aliases: dict[str, str]) -> str:
-    t = normalize(token)
-    return aliases.get(t, t)
-
-def map_aliases_list(items: list[str], aliases: dict[str,str]) -> list[str]:
-    if not aliases:
-        return items
-    return [apply_alias(it, aliases) for it in items]
-
 @st.cache_data
 def load_color_families(path: str) -> dict[str, str]:
     d = {}
@@ -177,6 +210,18 @@ def load_hook_families(path: str) -> dict[str, str]:
         pass
     return d
 
+# ---------- Matching logic
+
+def apply_alias(token: str, aliases: dict[str, str]) -> str:
+    t = normalize(token)
+    return aliases.get(t, t)
+
+def map_aliases_list(items: list[str], aliases: dict[str,str]) -> list[str]:
+    if not aliases:
+        return items
+    return [apply_alias(it, aliases) for it in items]
+
+
 def parse_color(token: str, color_map: dict[str,str]) -> tuple[str|None, str|None]:
     t = normalize(token)
     words = t.split()
@@ -190,6 +235,7 @@ def parse_color(token: str, color_map: dict[str,str]) -> tuple[str|None, str|Non
         if w in color_map:
             return w, color_map[w]
     return None, None
+
 
 def size_to_metric(size_str: str) -> float|None:
     if not size_str:
@@ -206,6 +252,7 @@ def size_to_metric(size_str: str) -> float|None:
         return 100 - n
     except:
         return None
+
 
 def parse_hook(token: str, hook_map: dict[str,str]) -> tuple[str|None, float|None, str|None]:
     t = normalize(token)
@@ -229,6 +276,7 @@ def parse_hook(token: str, hook_map: dict[str,str]) -> tuple[str|None, float|Non
         elif 'wet' in core: fam = 'wet'
     return fam, size_metric, length_tag
 
+
 def tokens_equal_loose(req: str, have: str, color_map: dict[str,str], ignore_labels: bool, ignore_color: bool) -> bool:
     req_token = strip_label(req) if ignore_labels else normalize(req)
     have_token = strip_label(have) if ignore_labels else normalize(have)
@@ -243,6 +291,7 @@ def tokens_equal_loose(req: str, have: str, color_map: dict[str,str], ignore_lab
             if req_base == have_base:
                 return True
     return False
+
 
 def hook_compatible(req: str, have: str, hook_map: dict[str,str], size_tolerance: int, require_length_match: bool) -> bool:
     if not isinstance(req, str) or not isinstance(have, str):
@@ -259,6 +308,7 @@ def hook_compatible(req: str, have: str, hook_map: dict[str,str], size_tolerance
         return True
     return abs(rsize - hsize) <= size_tolerance
 
+
 def expand_with_substitutions(inv_set: set[str], subs: dict[str, set[str]]) -> set[str]:
     expanded = set(inv_set)
     for base, eqs in subs.items():
@@ -267,6 +317,7 @@ def expand_with_substitutions(inv_set: set[str], subs: dict[str, set[str]]) -> s
         if any(eq in inv_set for eq in eqs):
             expanded.add(base)
     return expanded
+
 
 def compute_matches(flies_df: pd.DataFrame, inv_tokens: set[str], aliases_map: dict[str,str],
                     subs_map: dict[str, set[str]] | None, use_subs: bool, ignore_labels: bool,
@@ -301,6 +352,7 @@ def compute_matches(flies_df: pd.DataFrame, inv_tokens: set[str], aliases_map: d
         })
     return pd.DataFrame(results)
 
+
 def best_single_buys(matches_df: pd.DataFrame) -> pd.DataFrame:
     singles = matches_df[matches_df["missing_count"] == 1]["missing"]
     tokens = []
@@ -312,6 +364,7 @@ def best_single_buys(matches_df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=["material","unlocks"])
     rows = [{"material": m, "unlocks": n} for m, n in counter.most_common()]
     return pd.DataFrame(rows)
+
 
 def best_pair_buys(matches_df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
     pairs_counter = Counter()
@@ -325,6 +378,7 @@ def best_pair_buys(matches_df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
                 pairs_counter[pair] += 1
     rows = [{"materials_pair": " + ".join(pair), "unlocks": n} for pair, n in pairs_counter.most_common(top_n)]
     return pd.DataFrame(rows)
+
 
 def make_shopping_list(matches_df: pd.DataFrame, max_missing: int = 2) -> pd.DataFrame:
     subset = matches_df[(matches_df["missing_count"] >= 1) & (matches_df["missing_count"] <= max_missing)]
@@ -373,9 +427,11 @@ def load_brand_prefs(path: str) -> dict[str,list[str]]:
         pass
     return d
 
+
 def canonical_brand(name: str, brand_aliases: dict[str,str]) -> str:
     n = normalize(name)
     return brand_aliases.get(n, name)
+
 
 def suggest_hook_brand_model(req_token: str, hooks_catalog: pd.DataFrame, brand_prefs: dict[str,list[str]], hook_map: dict[str,str]):
     rfam, rsize, rlen = parse_hook(req_token, hook_map)
@@ -399,6 +455,7 @@ def suggest_hook_brand_model(req_token: str, hooks_catalog: pd.DataFrame, brand_
     row = df.iloc[0]
     return row['brand'], row['model']
 
+
 def enrich_buy_suggestions(df: pd.DataFrame, prefer_brands: bool, hooks_catalog: pd.DataFrame, brand_prefs: dict[str,list[str]], hook_map: dict[str,str]) -> pd.DataFrame:
     if df is None or df.empty:
         return df
@@ -419,6 +476,7 @@ def enrich_buy_suggestions(df: pd.DataFrame, prefer_brands: bool, hooks_catalog:
         df['suggested_model'] = models
     return df
 
+
 def validate_csv_schema(df: pd.DataFrame, required_cols: list[str], name: str) -> list[str]:
     errors = []
     missing = [c for c in required_cols if c not in df.columns]
@@ -428,6 +486,7 @@ def validate_csv_schema(df: pd.DataFrame, required_cols: list[str], name: str) -
         if col in df.columns and df[col].isnull().all():
             errors.append(f"{name}: column '{col}' is entirely empty")
     return errors
+
 
 def safe_read_csv(file_or_path, required_cols: list[str] | None = None) -> pd.DataFrame:
     """
@@ -447,54 +506,21 @@ def safe_read_csv(file_or_path, required_cols: list[str] | None = None) -> pd.Da
                 continue
     raise ValueError("Could not parse CSV. Please check the headers and delimiter.")
 
-def download_templates_ui():
-    st.markdown("### 📥 Download CSV templates")
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        with open("data/templates/flies_template.csv","rb") as f:
-            st.download_button("flies_template.csv", f.read(), file_name="flies_template.csv", mime="text/csv", help="Recipe template with headers + examples")
-    with c2:
-        with open("data/templates/inventory_template.csv","rb") as f:
-            st.download_button("inventory_template.csv", f.read(), file_name="inventory_template.csv", mime="text/csv", help="Inventory template (material,status,brand,model)")
-    with c3:
-        with open("data/templates/substitutions_template.csv","rb") as f:
-            st.download_button("substitutions_template.csv", f.read(), file_name="substitutions_template.csv", mime="text/csv", help="Substitution rules template")
-    with c4:
-        with open("data/templates/aliases_template.csv","rb") as f:
-            st.download_button("aliases_template.csv", f.read(), file_name="aliases_template.csv", mime="text/csv", help="Aliases template for normalizing inputs")
 
-def save_user_inventory(user_id: str, inv_df: pd.DataFrame) -> bool:
-    if DB is None or not isinstance(user_id, str) or not user_id.strip():
-        return False
-    try:
-        doc_ref = DB.collection("users").document(user_id.strip()).collection("app").document("inventory")
-        doc_ref.set({"rows": inv_df.to_dict(orient="records")}, merge=True)
-        return True
-    except Exception as e:
-        st.error(f"Failed to save inventory: {e}")
-        return False
+def first_http_link(text: str) -> str:
+    if not isinstance(text, str):
+        return ""
+    for part in text.split(";"):
+        u = part.strip()
+        if u.startswith("http://") or u.startswith("https://"):
+            return u
+    return ""
 
-def load_user_inventory(user_id: str) -> pd.DataFrame | None:
-    if DB is None or not isinstance(user_id, str) or not user_id.strip():
-        return None
-    try:
-        doc = DB.collection("users").document(user_id.strip()).collection("app").document("inventory").get()
-        if doc.exists:
-            rows = doc.to_dict().get("rows", [])
-            return pd.DataFrame(rows)
-        return None
-    except Exception as e:
-        st.error(f"Failed to load inventory: {e}")
-        return None
-
-
-# ====== NEW: Brand alias map used by the inventory editor to auto-extract brands ======
+# =============================
+# Brand auto-detect support (inventory editor)
+# =============================
 @st.cache_data
 def build_known_brands_aliases() -> dict[str, str]:
-    """
-    Build a token->brand map from brand aliases and hooks catalog, plus a few common brands.
-    Tries both brands_aliases.csv and brand_aliases.csv so naming doesn't matter.
-    """
     def _load_default_brand_aliases():
         m = load_brand_aliases("data/brands_aliases.csv")
         if not m:
@@ -515,10 +541,6 @@ def build_known_brands_aliases() -> dict[str, str]:
 KNOWN_BRANDS_ALIASES = build_known_brands_aliases()
 
 def normalize_inventory_entry(material_name: str, brand: str = "", model: str = ""):
-    """
-    Normalize an inventory row and auto-detect brand tokens embedded in the material string.
-    e.g., "wapsi pink chenille" -> ("pink chenille", "Wapsi", "")
-    """
     if not isinstance(material_name, str):
         material_name = ""
     tokens = normalize(material_name).split()
@@ -537,23 +559,31 @@ def normalize_inventory_entry(material_name: str, brand: str = "", model: str = 
         final_brand = ""
     return final_material, final_brand, final_model
 
-def first_http_link(text: str) -> str:
-    if not isinstance(text, str):
-        return ""
-    for part in text.split(";"):
-        u = part.strip()
-        if u.startswith("http://") or u.startswith("https://"):
-            return u
-    return ""
+# =============================
+# UI — Hero
+# =============================
+st.markdown(
+    """
+    <div style="padding: 1.2rem; border-radius: 16px; background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); color: #e2e8f0; border: 1px solid #334155;">
+      <h1 style="margin: 0 0 .4rem 0; font-size: 1.8rem;">🪶 Fly Tying Recommender</h1>
+      <p style="margin: 0;">See what you can tie now, what you're 1–2 items away from, and what to buy next — with brand/model preferences for hooks.</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
-# ====== Sidebar ======
+# =============================
+# Sidebar — onboarding & data sources
+# =============================
 with st.sidebar:
     st.info("This tool accepts CSVs with specific headers. Download templates below and follow the examples to avoid formatting issues.")
+
     with st.expander("🧭 Onboarding Checklist", expanded=True):
         if st.button("🚀 Quick Start (use bundled data & run)", use_container_width=True, help="Loads the bundled CSVs and jumps straight to results"):
             st.session_state["quickstart_run"] = True
             st.rerun()
         st.markdown("- Download **CSV templates**\n- Fill them in (keep headers)\n- Upload here\n- Toggle matching options as desired\n- Review results + Download shopping list")
+
     with st.expander("📄 Examples & Templates", expanded=False):
         st.code("""flies.csv headers:
 fly_name,type,species,materials,tutorials
@@ -564,24 +594,43 @@ material,status,brand,model
 thread: 8/0 brown,HALF,UNI,
 elk hair,LOW,Nature's Spirit,
 """, language="text")
-        download_templates_ui()
+
+        # Download template buttons (try GitHub, fallback to embedded bytes)
+        st.markdown("### 📥 Download CSV templates")
+        FALLBACKS = {
+            "data/templates/flies_template.csv": b"fly_name,type,species,materials,tutorials\nElk Hair Caddis (olive),Dry,trout;panfish,hook: dry #12; thread: 8/0 brown; body: dry dubbing olive; rib: gold wire; wing: elk hair; hackle: brown rooster saddle,https://www.youtube.com/watch?v=EXAMPLE\n",
+            "data/templates/inventory_template.csv": b"material,status,brand,model\nthread: 8/0 brown,HALF,UNI,\nelk hair,LOW,Nature's Spirit,\n",
+            "data/templates/substitutions_template.csv": b"material,equivalents\nelk hair,deer hair\ngold wire,copper wire\n",
+            "data/templates/aliases_template.csv": b"alias,canonical\nolive green,olive\npt,pheasant tail\n",
+        }
+        files = [
+            ("flies_template.csv", "data/templates/flies_template.csv", "Recipe template with headers + examples"),
+            ("inventory_template.csv", "data/templates/inventory_template.csv", "Inventory template (material,status,brand,model)"),
+            ("substitutions_template.csv", "data/templates/substitutions_template.csv", "Substitution rules template"),
+            ("aliases_template.csv", "data/templates/aliases_template.csv", "Aliases template for normalizing inputs"),
+        ]
+        c1, c2, c3, c4 = st.columns(4)
+        for col, (label, path, helptext) in zip([c1, c2, c3, c4], files):
+            content = fetch_bytes_from_github(path) or FALLBACKS[path]
+            with col:
+                st.download_button(label, content, file_name=label, mime="text/csv", help=helptext)
 
     # ---- 1) Load Recipes
     st.header("1) Load Recipes")
     flies_file = st.file_uploader("Upload your flies.csv", type=["csv"], key="flies_csv")
     if flies_file is not None:
         try:
-            raw = safe_read_csv(io.BytesIO(flies_file.getvalue()), required_cols=["fly_name","type","species","materials"])
-            errs = validate_csv_schema(coerce_flies_columns(raw.copy()), ["fly_name","type","species","materials"], "flies.csv")
+            raw_flies = safe_read_csv(io.BytesIO(flies_file.getvalue()), required_cols=["fly_name","type","species","materials"])
+            errs = validate_csv_schema(coerce_flies_columns(raw_flies.copy()), ["fly_name","type","species","materials"], "flies.csv")
             for e in errs:
                 st.warning(e)
-            flies_df = build_flies_df(raw)
+            flies_df = build_flies_df(raw_flies)
         except Exception as e:
             st.error(f"flies.csv parse issue: {e}")
             st.stop()
     else:
         st.markdown("Using bundled **data/flies.csv**")
-        flies_df = load_flies("data/flies.csv")
+        flies_df = load_flies_local("data/flies.csv")
 
     # ---- 2) Substitutions (Optional)
     st.header("2) Substitutions (Optional)")
@@ -604,8 +653,21 @@ elk hair,LOW,Nature's Spirit,
             st.warning(f"substitutions.csv could not be parsed: {e}")
             subs_map = {}
     else:
-        subs_map = load_subs("data/substitutions.csv")
-        st.markdown("Using bundled **data/substitutions.csv**.")
+        try:
+            raw = read_csv_from_github("data/substitutions.csv")
+            subs_map = {}
+            for _, row in raw.iterrows():
+                base = normalize(row.get("material",""))
+                eqs = set()
+                if isinstance(row.get("equivalents",""), str):
+                    for e in str(row["equivalents"]).split(";"):
+                        e = normalize(e)
+                        if e: eqs.add(e)
+                if base: subs_map[base] = eqs
+            st.markdown("Using **GitHub data/substitutions.csv**.")
+        except Exception:
+            subs_map = {}
+            st.warning("No substitutions on GitHub (skipping).")
 
     # ---- 2a) Aliases (Optional)
     st.header("2a) Aliases (Optional)")
@@ -624,10 +686,19 @@ elk hair,LOW,Nature's Spirit,
             st.warning(f"aliases.csv could not be parsed: {e}")
             aliases_map = {}
     else:
-        aliases_map = load_aliases("data/aliases.csv")
-        st.markdown("Using bundled **data/aliases.csv**.")
+        try:
+            df_alias = read_csv_from_github("data/aliases.csv")
+            aliases_map = {}
+            for _, row in df_alias.iterrows():
+                a = normalize(row.get("alias",""))
+                c = normalize(row.get("canonical",""))
+                if a and c: aliases_map[a] = c
+            st.markdown("Using **GitHub data/aliases.csv**.")
+        except Exception:
+            aliases_map = {}
+            st.warning("No aliases on GitHub (skipping).")
 
-    # ---- 3) Inventory
+    # ---- 3) Inventory input
     st.header("3) Inventory")
     method = st.radio("How will you provide inventory?", ["Upload CSV", "Paste text", "Use bundled sample"])
     inv_tokens_from_step3 = set()
@@ -669,114 +740,116 @@ elk hair,LOW,Nature's Spirit,
             st.success("Inventory parsed from pasted text.")
     else:
         try:
+            sample_inv = read_csv_from_github("data/inventory.csv")
+        except Exception:
             sample_inv = pd.read_csv("data/inventory.csv", encoding="utf-8", engine="python")
-            inv_full_df_from_step3 = sample_inv.copy()
-            present_mask = sample_inv.get('status','').astype(str).str.upper().ne('OUT')
-            inv_tokens_from_step3 = set(sample_inv[present_mask]["material"].dropna().map(normalize).tolist())
-            st.markdown("Using bundled **data/inventory.csv**.")
-        except Exception as e:
-            st.warning(f"Could not load bundled inventory: {e}")
+        inv_full_df_from_step3 = sample_inv.copy()
+        present_mask = sample_inv.get('status','').astype(str).str.upper().ne('OUT')
+        inv_tokens_from_step3 = set(sample_inv[present_mask]["material"].dropna().map(normalize).tolist())
+        st.markdown("Using bundled **data/inventory.csv**.")
 
-    # ---- 4) Matching Options
-# ---- 4) Matching Options
+# =============================
+# Main options
+# =============================
 st.header("4) Matching Options")
-
-use_subs = st.checkbox("Use substitutions",
-    value=st.session_state.get("pref_use_subs", True), key="pref_use_subs")
-ignore_labels = st.checkbox("Ignore part labels (looser matching)",
-    value=st.session_state.get("pref_ignore_labels", True), key="pref_ignore_labels")
-ignore_color = st.checkbox("Ignore color variations (match by color family)",
-    value=st.session_state.get("pref_ignore_color", True), key="pref_ignore_color")
+use_subs = st.checkbox("Use substitutions", value=st.session_state.get("pref_use_subs", True), key="pref_use_subs")
+ignore_labels = st.checkbox("Ignore part labels (looser matching)", value=st.session_state.get("pref_ignore_labels", True), key="pref_ignore_labels")
+ignore_color = st.checkbox("Ignore color variations (match by color family)", value=st.session_state.get("pref_ignore_color", True), key="pref_ignore_color")
 
 st.markdown("---")
 st.header("Hooks Matching")
-size_tol = st.slider("Hook size tolerance (higher = looser)", 0, 8,
-    st.session_state.get("pref_size_tol", 2), key="pref_size_tol")
-require_len = st.checkbox("Require length tag match (e.g., 3xl)",
-    value=st.session_state.get("pref_require_len", False), key="pref_require_len")
+size_tol = st.slider("Hook size tolerance (higher = looser)", 0, 8, st.session_state.get("pref_size_tol", 2), key="pref_size_tol")
+require_len = st.checkbox("Require length tag match (e.g., 3xl)", value=st.session_state.get("pref_require_len", False), key="pref_require_len")
 
 st.header("Brand & Model Preferences")
-
-brand_aliases_file = st.file_uploader(
-    "Upload brands_aliases.csv (alias,brand)", type=["csv"], key="brand_aliases_csv"
-)
+brand_aliases_file = st.file_uploader("Upload brands_aliases.csv (alias,brand)", type=["csv"], key="brand_aliases_csv")
 
 def _load_brand_aliases_default():
-    m = load_brand_aliases("data/brands_aliases.csv")
-    if not m:
-        m = load_brand_aliases("data/brand_aliases.csv")
+    try:
+        df = read_csv_from_github("data/brands_aliases.csv")
+    except Exception:
+        try:
+            df = read_csv_from_github("data/brand_aliases.csv")
+        except Exception:
+            return {}
+    m = {}
+    for _, row in df.iterrows():
+        a = normalize(row.get("alias",""))
+        b = row.get("brand","")
+        if a and b: m[a] = b
     return m
 
 brand_aliases = (
-    load_brand_aliases(brand_aliases_file)
-    if brand_aliases_file is not None
-    else _load_brand_aliases_default()
+    load_brand_aliases(brand_aliases_file) if brand_aliases_file is not None else _load_brand_aliases_default()
 )
 
-hooks_catalog_file = st.file_uploader(
-    "Upload hooks_catalog.csv (brand,model,family,length_tag,wire,eye,barbless,notes)",
-    type=["csv"], key="hooks_catalog_csv"
-)
+hooks_catalog_file = st.file_uploader("Upload hooks_catalog.csv (brand,model,family,length_tag,wire,eye,barbless,notes)", type=["csv"], key="hooks_catalog_csv")
 hooks_catalog = (
-    load_hooks_catalog(hooks_catalog_file)
-    if hooks_catalog_file is not None
-    else load_hooks_catalog("data/hooks_catalog.csv")
+    load_hooks_catalog(hooks_catalog_file) if hooks_catalog_file is not None else load_hooks_catalog("data/hooks_catalog.csv")
 )
 
-brand_prefs_file = st.file_uploader(
-    "Upload brand_prefs.csv (category,preferred_brands)", type=["csv"], key="brand_prefs_csv"
-)
+brand_prefs_file = st.file_uploader("Upload brand_prefs.csv (category,preferred_brands)", type=["csv"], key="brand_prefs_csv")
 brand_prefs = (
-    load_brand_prefs(brand_prefs_file)
-    if brand_prefs_file is not None
-    else load_brand_prefs("data/brand_prefs.csv")
+    load_brand_prefs(brand_prefs_file) if brand_prefs_file is not None else load_brand_prefs("data/brand_prefs.csv")
 )
 
-prefer_brands = st.checkbox(
-    "Prefer my brands/models in recommendations",
-    value=st.session_state.get("pref_prefer_brands", True),
-    key="pref_prefer_brands"
-)
+prefer_brands = st.checkbox("Prefer my brands/models in recommendations", value=st.session_state.get("pref_prefer_brands", True), key="pref_prefer_brands")
 
 # If user uploaded brand aliases, refresh the in-app auto-detection map immediately
 if brand_aliases_file is not None:
     KNOWN_BRANDS_ALIASES.clear()
     KNOWN_BRANDS_ALIASES.update({normalize(k): v for k, v in brand_aliases.items()})
-    passthrough = set([normalize(b) for b in (
-        hooks_catalog["brand"].dropna().unique().tolist() if not hooks_catalog.empty else []
-    )])
+    passthrough = set([normalize(b) for b in (hooks_catalog["brand"].dropna().unique().tolist() if not hooks_catalog.empty else [])])
     passthrough.update(["wapsi", "hareline", "uni", "veevus", "utc", "semperfli"])
     for b in passthrough:
         if b and b not in KNOWN_BRANDS_ALIASES:
             KNOWN_BRANDS_ALIASES[b] = b.title()
 
+# =============================
+# Status panel
+# =============================
+st.markdown("---")
+st.subheader("Status")
+try:
+    _flies_rows = int(flies_df.shape[0]) if 'flies_df' in locals() else 0
+    st.write(f"**flies_df**: {_flies_rows} rows loaded")
+except Exception as e:
+    st.error(f"flies_df not ready: {e}")
+_subs_len = len(subs_map) if 'subs_map' in locals() and subs_map else 0
+_aliases_len = len(aliases_map) if 'aliases_map' in locals() and aliases_map else 0
+st.write(f"**substitutions**: {_subs_len} rules | **aliases**: {_aliases_len} entries")
+_inv_count = len(inv_tokens_from_step3) if 'inv_tokens_from_step3' in locals() else 0
+st.write(f"**inventory materials present (Step 3)**: {_inv_count}")
 
-    # ---- Status panel
-    st.markdown("---")
-    st.subheader("Status")
-    try:
-        _flies_rows = int(flies_df.shape[0]) if 'flies_df' in locals() else 0
-        st.write(f"**flies_df**: {_flies_rows} rows loaded")
-    except Exception as e:
-        st.error(f"flies_df not ready: {e}")
-    _subs_len = len(subs_map) if 'subs_map' in locals() and subs_map else 0
-    _aliases_len = len(aliases_map) if 'aliases_map' in locals() and aliases_map else 0
-    st.write(f"**substitutions**: {_subs_len} rules | **aliases**: {_aliases_len} entries")
-    _inv_count = len(inv_tokens_from_step3) if 'inv_tokens_from_step3' in locals() else 0
-    st.write(f"**inventory materials present (Step 3)**: {_inv_count}")
+# Load color/hook maps (bundled, prefer GitHub if configured)
+try:
+    df_c = read_csv_from_github("data/color_families.csv")
+except Exception:
+    df_c = pd.read_csv("data/color_families.csv", encoding="utf-8", engine="python")
+color_map = {normalize(r.get("color","")): normalize(r.get("family","")) for _, r in df_c.iterrows() if normalize(r.get("color","")) and normalize(r.get("family",""))}
 
-# Load color/hook maps (bundled)
-color_map = load_color_families("data/color_families.csv")
-hook_map = load_hook_families("data/hooks_map.csv")
+try:
+    df_h = read_csv_from_github("data/hooks_map.csv")
+except Exception:
+    df_h = pd.read_csv("data/hooks_map.csv", encoding="utf-8", engine="python")
+hook_map = {normalize(r.get("keyword","")): normalize(r.get("family","")) for _, r in df_h.iterrows() if normalize(r.get("keyword","")) and normalize(r.get("family",""))}
 
-# ====== Manage Inventory (in-app editor using session state) ======
+# =============================
+# In-app Inventory Editor (session state)
+# =============================
+if "inventory_df" not in st.session_state:
+    st.session_state.inventory_df = pd.DataFrame(columns=["material", "status", "brand", "model"])
+
 st.header("📝 Manage Inventory (optional)")
-st.info("""
-Use this in-app editor if you want to manage inventory interactively without juggling CSVs.
-- **Add rows** at the bottom, **edit** any cell, or **remove** rows via the editor UI.
-- The tool will auto-detect brand tokens in the **Material Name** (e.g., “Wapsi pheasant tail” → Brand=Wapsi).
-- Use the download button to save an updated `inventory.csv` for your `data/` folder.
-""")
+st.info(
+    """
+    Use this in-app editor if you want to manage inventory interactively without juggling CSVs.
+    - **Add rows** at the bottom, **edit** any cell, or **remove** rows via the editor UI.
+    - The tool will auto-detect brand tokens in the **Material Name** (e.g., “Wapsi pheasant tail” → Brand=Wapsi).
+    - Use the download button to save an updated `inventory.csv` for your `data/` folder.
+    """
+)
+
 edited_df = st.data_editor(
     st.session_state.inventory_df,
     num_rows="dynamic",
@@ -790,27 +863,27 @@ edited_df = st.data_editor(
     key="inventory_editor_main"
 )
 
-if not edited_df.equals(st.session_state.inventory_df):
-    normalized_rows = []
-    for _, row in edited_df.iterrows():
-        if not str(row.get("material","")).strip():
-            continue
-        mat, brand, model = normalize_inventory_entry(row.get("material",""), row.get("brand",""), row.get("model",""))
-        normalized_rows.append({
-            "material": mat,
-            "status": str(row.get("status","")).upper(),
-            "brand": brand,
-            "model": model,
-        })
-    st.session_state.inventory_df = pd.DataFrame(normalized_rows).drop_duplicates().reset_index(drop=True)
-    st.rerun()
+if st.button("↩️ Reset editor to bundled sample"):
+    try:
+        sample_inv = pd.read_csv("data/inventory.csv", encoding="utf-8", engine="python")
+        expected = ["material", "status", "brand", "model"]
+        for col in expected:
+            if col not in sample_inv.columns:
+                sample_inv[col] = ""
+        st.session_state.inventory_df = sample_inv[expected].fillna("").drop_duplicates().reset_index(drop=True)
+        st.toast("Inventory editor reset to bundled sample.", icon="♻️")
+        st.rerun()
+    except Exception as e:
+        st.warning(f"Could not load bundled inventory: {e}")
 
 st.markdown("---")
 st.subheader("Save Your Edited Inventory")
 csv_data = st.session_state.inventory_df.to_csv(index=False).encode("utf-8")
 st.download_button("⬇️ Download updated inventory.csv", csv_data, file_name="inventory.csv", mime="text/csv")
 
-# ====== Tutorials & Recipe Builder ======
+# =============================
+# Tutorials & Recipe Builder
+# =============================
 st.header("Tutorials & Recipe Builder")
 st.write("Associate tutorials with recipes, or add new recipes from a tutorial.")
 
@@ -854,17 +927,25 @@ with st.expander("🆕 Create a new recipe from a tutorial"):
         flies_df.loc[len(flies_df)] = row
         st.success(f"Added new recipe '{nr_name}'. It will be included immediately in matching. Use the download button below to save updated flies.csv.")
 
-# --- Account ID handling with URL query params for cross-device convenience
+# =============================
+# Cloud sync: Account + prefs (only if DB configured)
+# =============================
+
+def doc_id_for(user_id: str) -> str:
+    secret = st.secrets.get("pepper", "local-dev")
+    return hmac.new(secret.encode(), user_id.strip().lower().encode(), hashlib.sha256).hexdigest()[:24]
+
 if "account_id" not in st.session_state:
     st.session_state["account_id"] = ""
 
-# Pick up ?acct=<id> from the URL on first load
 qp = st.query_params
 if "acct" in qp and not st.session_state.get("account_id"):
     acct_from_url = qp.get("acct")
     if isinstance(acct_from_url, list):
         acct_from_url = acct_from_url[0] if acct_from_url else ""
     st.session_state["account_id"] = acct_from_url or ""
+    if st.session_state["account_id"]:
+        st.toast(f"Loaded account from URL: {st.session_state['account_id']}", icon="✅")
 
 def set_account_id():
     acct = st.session_state.get("account_id", "").strip()
@@ -874,14 +955,12 @@ def set_account_id():
         if "acct" in st.query_params:
             del st.query_params["acct"]
 
-st.markdown("### ☁️ Cloud sync (temporary)")
 acct_id = st.text_input(
     "Account ID (temporary: enter your email or handle to save/load to the cloud)",
     key="account_id",
     placeholder="you@example.com",
-    on_change=set_account_id,   # <-- no args needed
+    on_change=set_account_id,
 )
-
 
 st.markdown("### ☁️ Cloud preferences")
 acct_id_prefs = st.text_input(
@@ -890,6 +969,53 @@ acct_id_prefs = st.text_input(
     value=st.session_state.get("account_id", ""),
     placeholder="you@example.com"
 )
+
+# Firestore helpers
+
+def save_user_inventory(user_id: str, inv_df: pd.DataFrame) -> bool:
+    if DB is None or not isinstance(user_id, str) or not user_id.strip():
+        return False
+    try:
+        doc_ref = DB.collection("users").document(doc_id_for(user_id)).collection("app").document("inventory")
+        doc_ref.set({"rows": inv_df.to_dict(orient="records")}, merge=True)
+        return True
+    except Exception as e:
+        st.error(f"Failed to save inventory: {e}")
+        return False
+
+def load_user_inventory(user_id: str) -> pd.DataFrame | None:
+    if DB is None or not isinstance(user_id, str) or not user_id.strip():
+        return None
+    try:
+        doc_ref = DB.collection("users").document(doc_id_for(user_id)).collection("app").document("inventory")
+        doc = doc_ref.get()
+        if doc.exists:
+            rows = doc.to_dict().get("rows", [])
+            return pd.DataFrame(rows)
+        return None
+    except Exception as e:
+        st.error(f"Failed to load inventory: {e}")
+        return None
+
+def save_user_prefs(user_id: str, prefs: dict) -> bool:
+    if DB is None or not isinstance(user_id, str) or not user_id.strip():
+        return False
+    try:
+        DB.collection("users").document(doc_id_for(user_id)).collection("app").document("preferences").set(prefs, merge=True)
+        return True
+    except Exception as e:
+        st.error(f"Failed to save preferences: {e}")
+        return False
+
+def load_user_prefs(user_id: str) -> dict | None:
+    if DB is None or not isinstance(user_id, str) or not user_id.strip():
+        return None
+    try:
+        doc = DB.collection("users").document(doc_id_for(user_id)).collection("app").document("preferences").get()
+        return doc.to_dict() if doc.exists else None
+    except Exception as e:
+        st.error(f"Failed to load preferences: {e}")
+        return None
 
 cP1, cP2 = st.columns(2)
 with cP1:
@@ -901,7 +1027,6 @@ with cP1:
             "pref_size_tol": int(st.session_state.get("pref_size_tol", 2)),
             "pref_require_len": bool(st.session_state.get("pref_require_len", False)),
             "pref_prefer_brands": bool(st.session_state.get("pref_prefer_brands", True)),
-            # persist user-tunable maps too
             "aliases_map": locals().get("aliases_map", {}),
             "subs_map": {k: sorted(list(v)) for k, v in (locals().get("subs_map", {}) or {}).items()},
             "brand_prefs": locals().get("brand_prefs", {}),
@@ -914,12 +1039,9 @@ with cP2:
         if not prefs:
             st.warning("No preferences found for this account.")
         else:
-            # apply widget-backed prefs
-            for k in ["pref_use_subs","pref_ignore_labels","pref_ignore_color",
-                      "pref_size_tol","pref_require_len","pref_prefer_brands"]:
+            for k in ["pref_use_subs","pref_ignore_labels","pref_ignore_color","pref_size_tol","pref_require_len","pref_prefer_brands"]:
                 if k in prefs:
                     st.session_state[k] = prefs[k]
-            # merge in maps if present
             if "aliases_map" in prefs and isinstance(prefs["aliases_map"], dict):
                 aliases_map.update({str(k): str(v) for k, v in prefs["aliases_map"].items()})
             if "subs_map" in prefs and isinstance(prefs["subs_map"], dict):
@@ -930,6 +1052,46 @@ with cP2:
                 brand_prefs.update(prefs["brand_prefs"])
             st.success("Preferences loaded from cloud.")
             st.rerun()
+
+with st.expander("📦 Export / Import preferences (JSON)"):
+    cur_prefs = {
+        "pref_use_subs": bool(st.session_state.get("pref_use_subs", True)),
+        "pref_ignore_labels": bool(st.session_state.get("pref_ignore_labels", True)),
+        "pref_ignore_color": bool(st.session_state.get("pref_ignore_color", True)),
+        "pref_size_tol": int(st.session_state.get("pref_size_tol", 2)),
+        "pref_require_len": bool(st.session_state.get("pref_require_len", False)),
+        "pref_prefer_brands": bool(st.session_state.get("pref_prefer_brands", True)),
+        "aliases_map": locals().get("aliases_map", {}),
+        "subs_map": {k: sorted(list(v)) for k, v in (locals().get("subs_map", {}) or {}).items()},
+        "brand_prefs": locals().get("brand_prefs", {}),
+    }
+    st.download_button(
+        "⬇️ Export preferences.json",
+        data=json.dumps(cur_prefs, indent=2).encode("utf-8"),
+        file_name="preferences.json",
+        mime="application/json",
+        help="Download your current preferences"
+    )
+
+    prefs_json_upload = st.file_uploader("Import preferences.json", type=["json"], key="prefs_json_upload")
+    if prefs_json_upload is not None:
+        try:
+            imported = json.loads(prefs_json_upload.getvalue().decode("utf-8"))
+            for k in ["pref_use_subs","pref_ignore_labels","pref_ignore_color","pref_size_tol","pref_require_len","pref_prefer_brands"]:
+                if k in imported:
+                    st.session_state[k] = imported[k]
+            if "aliases_map" in imported and isinstance(imported["aliases_map"], dict):
+                aliases_map.update({str(k): str(v) for k, v in imported["aliases_map"].items()})
+            if "subs_map" in imported and isinstance(imported["subs_map"], dict):
+                subs_map.clear()
+                for b, eqs in imported["subs_map"].items():
+                    subs_map[str(b)] = set(str(e) for e in (eqs or []))
+            if "brand_prefs" in imported and isinstance(imported["brand_prefs"], dict):
+                brand_prefs.update(imported["brand_prefs"])
+            st.success("Preferences imported from JSON.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Could not import preferences JSON: {e}")
 
 cA, cB = st.columns(2)
 with cA:
@@ -953,32 +1115,7 @@ with cB:
             st.success("Loaded inventory from the cloud.")
             st.rerun()
 
-if DB is None:
-    st.info("Cloud database not configured. Add Firebase service account to Streamlit **Secrets** to enable cloud sync.")
-
-def save_user_prefs(user_id: str, prefs: dict) -> bool:
-    if DB is None or not isinstance(user_id, str) or not user_id.strip():
-        return False
-    try:
-        DB.collection("users").document(user_id.strip()).collection("app").document("preferences").set(prefs, merge=True)
-        return True
-    except Exception as e:
-        st.error(f"Failed to save preferences: {e}")
-        return False
-
-def load_user_prefs(user_id: str) -> dict | None:
-    if DB is None or not isinstance(user_id, str) or not user_id.strip():
-        return None
-    try:
-        doc = DB.collection("users").document(user_id.strip()).collection("app").document("preferences").get()
-        return doc.to_dict() if doc.exists else None
-    except Exception as e:
-        st.error(f"Failed to load preferences: {e}")
-        return None
-
-# Auto-load once if we have an account id and haven't auto-loaded yet
 if DB is not None and st.session_state.get("account_id") and not st.session_state.get("did_auto_load"):
-    # Inventory
     df_cloud = load_user_inventory(st.session_state["account_id"])
     if isinstance(df_cloud, pd.DataFrame) and not df_cloud.empty:
         expected = ["material", "status", "brand", "model"]
@@ -987,14 +1124,11 @@ if DB is not None and st.session_state.get("account_id") and not st.session_stat
                 df_cloud[col] = ""
         st.session_state.inventory_df = df_cloud[expected].fillna("").drop_duplicates().reset_index(drop=True)
 
-    # Preferences
     prefs = load_user_prefs(st.session_state["account_id"])
     if prefs:
-        for k in ["pref_use_subs","pref_ignore_labels","pref_ignore_color",
-                  "pref_size_tol","pref_require_len","pref_prefer_brands"]:
+        for k in ["pref_use_subs","pref_ignore_labels","pref_ignore_color","pref_size_tol","pref_require_len","pref_prefer_brands"]:
             if k in prefs:
                 st.session_state[k] = prefs[k]
-        # maps
         if "aliases_map" in prefs and isinstance(prefs["aliases_map"], dict):
             aliases_map.update({str(k): str(v) for k, v in prefs["aliases_map"].items()})
         if "subs_map" in prefs and isinstance(prefs["subs_map"], dict):
@@ -1007,13 +1141,14 @@ if DB is not None and st.session_state.get("account_id") and not st.session_stat
     st.session_state["did_auto_load"] = True
     st.rerun()
 
-
 # Allow downloading the current flies
 if "flies_df" in locals():
     csv_bytes = locals()["flies_df"].to_csv(index=False).encode("utf-8")
     st.download_button("⬇️ Download updated flies.csv", csv_bytes, file_name="flies.csv", mime="text/csv")
 
-# ====== Inventory Source for Matching ======
+# =============================
+# Inventory source selection & run
+# =============================
 st.markdown("---")
 st.header("Inventory Source for Matching")
 inv_source = st.radio(
@@ -1023,10 +1158,7 @@ inv_source = st.radio(
     help="The editor lets you manage inventory inline. Merge = union of both sources (excluding items with status OUT)."
 )
 
-# Explicit run control
 run_now = st.button("▶️ Run matching")
-
-# Honor Quick Start (if pressed in the sidebar)
 if st.session_state.get("quickstart_run"):
     run_now = True
     st.session_state["quickstart_run"] = False
@@ -1035,7 +1167,6 @@ if not run_now:
     st.info("Click **Run matching** after uploads/changes.")
     st.stop()
 
-# ====== Matching & Results ======
 if "flies_df" not in locals() or locals()["flies_df"].empty:
     st.error("No recipes loaded. Please upload a valid flies.csv or use the bundled one from data/flies.csv.")
     st.stop()
@@ -1047,28 +1178,8 @@ prefer_brands = locals().get("prefer_brands", True)
 size_tol = locals().get("size_tol", 2)
 require_len = locals().get("require_len", False)
 
-def status_badge(s: str) -> str:
-    m = str(s).upper()
-    return {"NEW":"🆕 New", "HALF":"🌓 Half", "LOW":"🪫 Low", "OUT":"⛔️ Out", "":""}.get(m, m)
-
-def derive_known_material_tokens(flies_df: pd.DataFrame, aliases_map: dict[str,str], subs_map: dict[str,set[str]]|None) -> set[str]:
-    known = set()
-    # from recipes
-    for lst in flies_df["materials_list"]:
-        known.update(map_aliases_list(lst, aliases_map))
-    # alias canonical values
-    known.update([normalize(v) for v in aliases_map.values()])
-    # substitutions bases + equivalents
-    if subs_map:
-        for b, eqs in subs_map.items():
-            known.add(normalize(b))
-            known.update([normalize(e) for e in eqs])
-    return {normalize(strip_label(k)) for k in known if k}
-
-# Build inventory tokens from Step 3 section
+# Build inventory tokens
 inv_tokens_step3 = locals().get("inv_tokens_from_step3", set())
-
-# Build inventory tokens from Session Editor
 inv_editor_df = st.session_state.get("inventory_df", pd.DataFrame(columns=["material","status","brand","model"]))
 if not inv_editor_df.empty:
     present_mask_editor = inv_editor_df.get("status","").astype(str).str.upper().ne("OUT")
@@ -1098,15 +1209,14 @@ matches_df = compute_matches(
     require_length_match=require_len
 )
 
-# Attach the first tutorial link for each fly (optional but nice)
-matches_df = matches_df.merge(
-    flies_df[["fly_name", "tutorials"]],
-    on="fly_name",
-    how="left"
-)
+# Attach first tutorial link
+matches_df = matches_df.merge(flies_df[["fly_name", "tutorials"]], on="fly_name", how="left")
 matches_df["tutorial"] = matches_df["tutorials"].apply(first_http_link)
 matches_df.drop(columns=["tutorials"], inplace=True)
 
+# =============================
+# Results & tools
+# =============================
 st.subheader("Summary")
 c1, c2, c3 = st.columns(3)
 c1.metric("✅ Can tie now", int((matches_df["missing_count"] == 0).sum()))
@@ -1128,9 +1238,7 @@ with col3:
     )
 
 fly_query = st.text_input("🔎 Search by fly name", "", placeholder="e.g. elk hair, pheasant tail, zonker...")
-
-near_miss_cap = st.slider("Near-miss threshold (≤ this many missing)", 2, 6, 3,
-                          help="Show and aggregate flies that are within this many missing materials.")
+near_miss_cap = st.slider("Near-miss threshold (≤ this many missing)", 2, 6, 3, help="Show and aggregate flies that are within this many missing materials.")
 
 def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     mask_type = df["type"].isin(type_filter)
@@ -1142,7 +1250,12 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
         out = out[keep]
     return out
 
-tab1, tab2, tab3, tabN, tab4, tab5, tabW = st.tabs([
+# Tabs
+with st.tabs(["✅ Can tie now", "🟡 Missing 1", "🟠 Missing 2", f"🟣 Near misses (≤{near_miss_cap})", "🛒 Best buys", "📦 Inventory status & brands", "🧪 What-if"]) as tabs:
+    pass
+
+# Because of Streamlit's API, rebuild explicit tab blocks
+_tab1, _tab2, _tab3, _tabN, _tab4, _tab5, _tabW = st.tabs([
     "✅ Can tie now",
     "🟡 Missing 1",
     "🟠 Missing 2",
@@ -1152,29 +1265,23 @@ tab1, tab2, tab3, tabN, tab4, tab5, tabW = st.tabs([
     "🧪 What-if"
 ])
 
-with tab1:
+with _tab1:
     df = apply_filters(matches_df[matches_df["missing_count"] == 0])
     st.dataframe(df, use_container_width=True)
     if df.empty:
         st.info("No results here with the current filters. Try widening Type/Species or raising the near-miss threshold.")
 
-with tab2:
+with _tab2:
     df = apply_filters(matches_df[matches_df["missing_count"] == 1])
     st.dataframe(df, use_container_width=True)
     if df.empty:
         st.info("No results here with the current filters. Try widening Type/Species or raising the near-miss threshold.")
-    # ➕ Add missing-1 items to the editor
     miss_pool_1 = []
     for cell in df["missing"].dropna():
         miss_pool_1.extend([x.strip() for x in str(cell).split(";") if x.strip()])
     miss_opts_1 = sorted(set(miss_pool_1))
     sel_add_1 = st.multiselect("➕ Add these missing items to the Inventory Editor", miss_opts_1, key="add_miss1")
     if st.button("Add selected to Editor", key="btn_add_miss1"):
-        added = (lambda items: (
-            st.session_state.get("inventory_df", pd.DataFrame(columns=["material","status","brand","model"])),
-            0
-        ))(None)  # placeholder to create local scope
-        # use proper helper
         def add_items_to_editor(items: list[str]) -> int:
             if not items:
                 return 0
@@ -1185,7 +1292,6 @@ with tab2:
                 tok = normalize(raw)
                 if not tok:
                     continue
-                # Skip if already present (case-insensitive match on material)
                 if not base.empty and (base["material"].astype(str).str.lower() == tok).any():
                     continue
                 mat, brand, model = normalize_inventory_entry(tok, "", "")
@@ -1201,12 +1307,11 @@ with tab2:
         added = add_items_to_editor(sel_add_1)
         st.success(f"Added {added} item(s) to the editor.")
 
-with tab3:
+with _tab3:
     df = apply_filters(matches_df[matches_df["missing_count"] == 2])
     st.dataframe(df, use_container_width=True)
     if df.empty:
         st.info("No results here with the current filters. Try widening Type/Species or raising the near-miss threshold.")
-    # ➕ Add missing-2 items to the editor
     miss_pool_2 = []
     for cell in df["missing"].dropna():
         miss_pool_2.extend([x.strip() for x in str(cell).split(";") if x.strip()])
@@ -1238,16 +1343,29 @@ with tab3:
         added = add_items_to_editor(sel_add_2)
         st.success(f"Added {added} item(s) to the editor.")
 
-with tabN:
+with _tabN:
     df = apply_filters(matches_df[matches_df["missing_count"] <= near_miss_cap])
     st.dataframe(df.sort_values(["missing_count", "required_count", "fly_name"]), use_container_width=True)
     if df.empty:
         st.info("No results here with the current filters. Try widening Type/Species or raising the near-miss threshold.")
 
-with tab4:
+with _tab4:
     singles = best_single_buys(matches_df)
-    hooks_catalog = load_hooks_catalog("data/hooks_catalog.csv")
-    brand_prefs = load_brand_prefs("data/brand_prefs.csv")
+    try:
+        hooks_catalog = read_csv_from_github("data/hooks_catalog.csv")
+    except Exception:
+        hooks_catalog = pd.read_csv("data/hooks_catalog.csv", encoding="utf-8", engine="python")
+    try:
+        df_bp = read_csv_from_github("data/brand_prefs.csv")
+        brand_prefs = {}
+        for _, row in df_bp.iterrows():
+            cat = normalize(row.get("category",""))
+            prefs = row.get("preferred_brands","")
+            arr = [p.strip() for p in str(prefs).split(";") if str(p).strip()]
+            if cat: brand_prefs[cat] = arr
+    except Exception:
+        brand_prefs = {}
+
     singles = enrich_buy_suggestions(singles, prefer_brands, hooks_catalog, brand_prefs, hook_map)
     pairs = best_pair_buys(matches_df)
 
@@ -1284,9 +1402,35 @@ with tab4:
         mime="text/csv"
     )
 
-with tab5:
+    if not shopping_df.empty:
+        lines = []
+        for _, r in shopping_df.iterrows():
+            line = f"- {r.get('material','')}"
+            if prefer_brands and str(r.get('suggested_brand','')).strip():
+                bm = f"{r.get('suggested_brand','')} {r.get('suggested_model','')}".strip()
+                if bm:
+                    line += f" — {bm}"
+            lines.append(line)
+        shopping_text = "\n".join(lines)
+        st.markdown("**Shopping list (plain text):**")
+        st.text_area("Copyable shopping list", shopping_text, height=150, label_visibility="collapsed")
+        escaped = json.dumps(shopping_text)
+        st.markdown(
+            f"""
+            <button onClick='navigator.clipboard.writeText({escaped});' style="margin-top:6px;padding:6px 10px;border-radius:8px;border:1px solid #ccc;cursor:pointer">
+              📋 Copy shopping list
+            </button>
+            """,
+            unsafe_allow_html=True
+        )
+
+with _tab5:
     st.markdown("**Inventory from Step 3 (upload/paste/sample):**")
     inv_full_df_from_step3 = locals().get("inv_full_df_from_step3", None)
+    def status_badge(s: str) -> str:
+        m = str(s).upper()
+        return {"NEW":"🆕 New", "HALF":"🌓 Half", "LOW":"🪫 Low", "OUT":"⛔️ Out", "":""}.get(m, m)
+
     if inv_full_df_from_step3 is not None:
         disp = inv_full_df_from_step3.copy()
         if 'status' in disp.columns:
@@ -1306,6 +1450,18 @@ with tab5:
         inv_tokens_step3 = locals().get("inv_tokens_from_step3", set())
         inv_tokens_editor = set(st.session_state.inventory_df["material"].dropna().map(normalize).tolist()) if not st.session_state.inventory_df.empty else set()
         inv_all_tokens = inv_tokens_step3.union(inv_tokens_editor)
+
+        def derive_known_material_tokens(flies_df: pd.DataFrame, aliases_map: dict[str,str], subs_map: dict[str,set[str]]|None) -> set[str]:
+            known = set()
+            for lst in flies_df["materials_list"]:
+                known.update(map_aliases_list(lst, aliases_map))
+            known.update([normalize(v) for v in aliases_map.values()])
+            if subs_map:
+                for b, eqs in subs_map.items():
+                    known.add(normalize(b))
+                    known.update([normalize(e) for e in eqs])
+            return {normalize(strip_label(k)) for k in known if k}
+
         known_tokens = derive_known_material_tokens(flies_df, aliases_map, subs_map)
 
         suspicious = []
@@ -1321,21 +1477,17 @@ with tab5:
         else:
             st.success("No obvious anomalies found in your inventory 🎉")
 
-with tabW:
+with _tabW:
     st.markdown("Try adding prospective buys to your inventory and preview what unlocks.")
-
-    # Base list to choose from = current shopping list
     base_shop_df = make_shopping_list(matches_df, max_missing=near_miss_cap)
     base_items = base_shop_df["material"].tolist() if not base_shop_df.empty else []
     pick = st.multiselect("Select items to hypothetically add", base_items, help="Start with the shopping list; you can also type free-form entries below.")
-
     extra_freeform = st.text_area("Optional free-form additions (one per line)", height=100, placeholder="hook: nymph #16\ndry dubbing olive\nkrystal flash pearl")
     extra_tokens = [normalize(x) for x in extra_freeform.splitlines() if x.strip()]
 
     simulate_btn = st.button("Run what-if simulation")
     if simulate_btn:
         hypothetical_inv = set(inv_tokens).union(set(pick)).union(set(extra_tokens))
-
         matches_sim = compute_matches(
             flies_df=flies_df,
             inv_tokens=hypothetical_inv,
@@ -1349,19 +1501,13 @@ with tabW:
             size_tolerance=size_tol,
             require_length_match=require_len
         )
-
         cA, cB, cC = st.columns(3)
         cA.metric("✅ Can tie now (what-if)", int((matches_sim["missing_count"] == 0).sum()))
         cB.metric("🟡 Missing 1 (what-if)", int((matches_sim["missing_count"] == 1).sum()))
         cC.metric("🟠 Missing 2 (what-if)", int((matches_sim["missing_count"] == 2).sum()))
-
         unlocked = matches_sim[(matches_sim["missing_count"] == 0) & (matches_df["missing_count"] > 0)]
         st.markdown("**Newly unlocked patterns (vs. current):**")
-        st.dataframe(
-            unlocked[["fly_name","type","species"]].sort_values(["type","fly_name"]),
-            use_container_width=True
-        )
-
+        st.dataframe(unlocked[["fly_name","type","species"]].sort_values(["type","fly_name"]), use_container_width=True)
         st.download_button(
             "⬇️ Download what-if unlocked list (CSV)",
             unlocked[["fly_name","type","species"]].to_csv(index=False).encode("utf-8"),
@@ -1369,11 +1515,13 @@ with tabW:
             mime="text/csv"
         )
 
+# =============================
+# Export bundle
+# =============================
 st.markdown("---")
 st.subheader("⬇️ Download everything (ZIP bundle)")
 
 if st.button("Build ZIP bundle"):
-    # Recompute standard exports locally so this block is self-contained
     hooks_catalog = load_hooks_catalog("data/hooks_catalog.csv")
     brand_prefs = load_brand_prefs("data/brand_prefs.csv")
     singles_all = enrich_buy_suggestions(best_single_buys(matches_df), prefer_brands, hooks_catalog, brand_prefs, hook_map)
@@ -1392,7 +1540,6 @@ if st.button("Build ZIP bundle"):
         if not st.session_state.inventory_df.empty:
             z.writestr("inventory_editor.csv", st.session_state.inventory_df.to_csv(index=False))
         z.writestr("flies.csv", flies_df.to_csv(index=False))
-        # Save the current options for reproducibility
         opts = {
             "use_subs": bool(locals().get("use_subs", True)),
             "ignore_labels": bool(locals().get("ignore_labels", True)),
