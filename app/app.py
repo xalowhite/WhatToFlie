@@ -106,6 +106,16 @@ def get_firebase_user():
     if admin_auth is None:
         return None
     
+        # After processing authentication, clean up token from URL if present
+    if st.session_state.get("firebase_uid") and 'token' in st.query_params:
+        params = st.experimental_get_query_params()
+        # Remove auth-related query params
+        for key in ['token', 'uid', 'email']:
+            params.pop(key, None)
+        # Update the URL without those parameters (triggers a rerun)
+        st.experimental_set_query_params(**params)
+
+    
     # Check if we already have a user in session
     if st.session_state.get("firebase_uid"):
         # Already authenticated, don't process token again
@@ -130,12 +140,15 @@ def get_firebase_user():
         return None
 
 def handle_logout():
-    """Handle user logout"""
     if st.button("Sign out", key="signout_btn", type="secondary"):
+        # Clear user session info
         st.session_state.pop("firebase_uid", None)
         st.session_state.pop("firebase_email", None)
-        st.query_params.clear()
+        # Remove all query parameters from the URL
+        st.experimental_set_query_params()
+        # Rerun the app to apply changes
         st.rerun()
+
 
 # Process authentication
 _ = get_firebase_user()
