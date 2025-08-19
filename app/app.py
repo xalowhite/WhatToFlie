@@ -102,42 +102,30 @@ def render_google_login_popup():
 # Authentication Processing (FIXED - No Redirect Loop)
 # =============================
 def get_firebase_user():
-    """Process Firebase authentication token from URL"""
+    """Process Firebase authentication token from URL."""
     if admin_auth is None:
         return None
-    
-        # After processing authentication, clean up token from URL if present
-    if st.session_state.get("firebase_uid") and 'token' in st.query_params:
-        params = st.experimental_get_query_params()
-        # Remove auth-related query params
-        for key in ['token', 'uid', 'email']:
-            params.pop(key, None)
-        # Update the URL without those parameters (triggers a rerun)
-        st.experimental_set_query_params(**params)
 
-    
-    # Check if we already have a user in session
+    # Already authenticated? Nothing to do.
     if st.session_state.get("firebase_uid"):
-        # Already authenticated, don't process token again
         return None
-        
+
+    # Extract token from URL
     token = st.query_params.get("token", "")
     if isinstance(token, list):
         token = token[0] if token else ""
     if not token:
         return None
-        
+
     try:
         decoded_token = admin_auth.verify_id_token(token)
         st.session_state["firebase_uid"] = decoded_token.get("uid", "")
         st.session_state["firebase_email"] = decoded_token.get("email", "")
-        
-        # DON'T clean URL or rerun - just let it be
-        # The token in URL doesn't hurt anything
         return decoded_token
     except Exception as e:
         st.error(f"Authentication verification failed: {e}")
         return None
+
 
 def handle_logout():
     if st.button("Sign out", key="signout_btn", type="secondary"):
@@ -152,6 +140,13 @@ def handle_logout():
 
 # Process authentication
 _ = get_firebase_user()
+
+# Clean auth params from URL once signed in
+if st.session_state.get("firebase_uid"):
+    for k in ("token", "uid", "email"):
+        if k in st.query_params:
+            del st.query_params[k]
+
 
 # Display authentication status
 st.markdown("### 🔐 Authentication Status")
