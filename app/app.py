@@ -86,33 +86,10 @@ FIREBASE_WEB_CONFIG = dict(st.secrets.get("firebase_web", {})) or {
 # Improved Google Sign-In
 # =============================
 def render_google_login_popup():
-    parent_origin = "https://whattoflie.streamlit.app"
-    login_url = (
-        "https://whattoflie.web.app/login.html"
-        "?popup=true"
-        f"&parent_origin={parent_origin}"
-        f"&return_to={parent_origin}"
-        "&v=7"
-    )
-    components.html(f"""
-      <button style="padding:8px 12px;border-radius:8px;border:1px solid #ccc;cursor:pointer"
-              onclick="(function(){{
-        const w = window.open('{login_url}', 'wtfLogin', 'width=500,height=700');
-        function onMsg(ev){{
-          if (!ev || !ev.data || ev.data.type !== 'auth_success') return;
-          // optionally restrict origins:
-          // if (ev.origin !== 'https://whattoflie.web.app') return;
-          const u = new URL(window.location.href);
-          u.searchParams.set('token', ev.data.token);
-          u.searchParams.set('uid', ev.data.uid);
-          u.searchParams.set('email', ev.data.email);
-          window.removeEventListener('message', onMsg);
-          try {{ if (w) w.close(); }} catch (e) {{}}
-          window.location.replace(u.toString());
-        }}
-        window.addEventListener('message', onMsg);
-      }})()">🔑 Sign in with Google</button>
-    """, height=60)
+    login_url = "https://whattoflie.web.app/login.html"
+    return_to = "https://whattoflie.streamlit.app/"
+    v = "6"  # bump on each deploy
+    st.link_button("🔑 Sign in with Google", f"{login_url}?v={v}&return_to={return_to}")
 
 
 
