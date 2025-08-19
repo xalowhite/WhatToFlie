@@ -1,0 +1,54 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Sign in to WhatToFlie</title>
+  </head>
+  <body>
+    <h2>Sign in</h2>
+    <button id="google">Sign in with Google</button>
+
+    <script type="module">
+      import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+      import { getAuth, GoogleAuthProvider, signInWithPopup } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+
+      const firebaseConfig = {
+        apiKey: "AIzaSyA_dlivqpvqiYQVp0AC-yF1ZTkDSjIxVuE",
+        authDomain: "whattoflie.firebaseapp.com",
+        projectId: "whattoflie",
+      };
+
+      const app = initializeApp(firebaseConfig);
+      const auth = getAuth(app);
+
+      document.getElementById("google").onclick = async () => {
+        const provider = new GoogleAuthProvider();
+        const result = await signInWithPopup(auth, provider);
+        const token = await result.user.getIdToken();   // short-lived ID token
+        const uid = result.user.uid;
+        const email = encodeURIComponent(result.user.email || "");
+
+        const target = new URL("https://whattoflie.streamlit.app/");
+        target.searchParams.set("token", token);
+        target.searchParams.set("uid", uid);
+        target.searchParams.set("email", email);
+        window.location = target.toString();
+      };
+    </script>
+  </body>
+</html>
+
+{
+  "hosting": {
+    "public": "public",
+    "rewrites": [
+      { "source": "/login", "destination": "/login.html" }
+    ]
+  }
+}
+<button id="logout">Sign out</button>
+<script type="module">
+  import { getAuth, signOut } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+  // ... after you initialize auth
+  document.getElementById("logout").onclick = () => signOut(auth);
+</script>

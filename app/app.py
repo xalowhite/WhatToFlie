@@ -118,36 +118,117 @@ if APP_PASSCODE:
         st.stop()
 
 # =============================
-# Firebase Admin (server) for verifying ID tokens + Firestore
-# =============================
-try:
-    import firebase_admin
-    from firebase_admin import credentials, firestore
-    _FIREBASE_AVAILABLE = True
-except Exception:
-    _FIREBASE_AVAILABLE = False
-
-def init_firestore():
-    if not _FIREBASE_AVAILABLE:
-        return None
-    try:
-        svc = st.secrets.get("gcp_service_account")
-        if not svc:
-            return None
-        if not firebase_admin._apps:
-            cred = credentials.Certificate(dict(svc))
-            firebase_admin.initialize_app(cred)
-        return firestore.client()
-    except Exception as e:
-        st.warning(f"Firestore not initialized: {e}")
-        return None
-
-DB = init_firestore()
-
+# ---- Firebase Admin: verify ID token & Firestore ----
 try:
     from firebase_admin import auth as admin_auth
 except Exception:
     admin_auth = None
+
+def get_firebase_user():
+    """Verify ?token=... and cache uid/email in session; then strip token from the URL."""
+    if admin_auth is None:
+        # Server missing firebase_admin or not initialized with a service account
+        st.info("Server auth not configured (firebase_admin missing or not initialized). Sign-in will be ignored.")
+        return None
+
+    tok = st.query_params.get("token", "")
+    if isinstance(tok, list):
+        tok = tok[0] if tok else ""
+    if not tok:
+        return None
+
+    try:
+        decoded = admin_auth.verify_id_token(tok)
+        st.session_state["firebase_uid"] = decoded.get("uid", "")
+        st.session_state["firebase_email"] = decoded.get("email", "")
+
+        # Scrub auth params so the token isn’t left in the URL
+        qp = dict(st.query_params)
+        for k in ("token", "uid", "email"):
+            qp.pop(k, None)
+        st.query_params.clear()
+        for k, v in qp.items():
+            st.query_params[k] = v
+
+        return decoded
+    except Exception as e:
+        st.warning(f"Auth token invalid/expired: {e}")
+        return None
+
+def _maybe_handle_logout_flag():
+    # if the client added ?logout=1, clear server session and scrub URL
+    if st.query_params.get("logout"):
+        st.session_state.pop("firebase_uid", None)
+        st.session_state.pop("firebase_email", None)
+        qp = dict(st.query_params)
+        qp.pop("logout", None)
+        st.query_params.clear()
+        for k, v in qp.items():
+            st.query_params[k] = v
+
+# Process token (if present) and handle logout flag on every load
+_ = get_firebase_user()
+_maybe_handle_logout_flag()
+
+# (TEMP) Tiny debug caption so you can see what's happening; remove later.
+st.caption(f"dbg: uid={st.session_state.get('firebase_uid')} qp={list(st.query_params.keys())}")
+
+# Render auth UI
+if st.session_state.get("firebase_uid"):
+    st.success(f"Signed in as {st.session_state.get('firebase_email','')} ✅")
+    render_google_signout_button()
+else:
+    st.info("🔐 Sign in to sync your inventory & prefs.")
+    render_google_login_button()
+
+
+
+def get_firebase_user():
+    """Verify ?token=... and cache uid/email in session; then strip token from the URL."""
+    # If the admin SDK isn’t available, we can’t verify tokens
+    if admin_auth is None:
+        st.info("Server auth not configured (firebase_admin missing or not initialized). Sign-in will be ignored.")
+        return None
+
+    tok = st.query_params.get("token", "")
+    if isinstance(tok, list):
+        tok = tok[0] if tok else ""
+    if not tok:
+        return None
+
+    try:
+        decoded = admin_auth.verify_id_token(tok)
+        st.session_state["firebase_uid"] = decoded.get("uid", "")
+        st.session_state["firebase_email"] = decoded.get("email", "")
+
+        # Scrub auth params so the token isn’t left in the URL
+        qp = dict(st.query_params)
+        for k in ("token", "uid", "email"):
+            qp.pop(k, None)
+        st.query_params.clear()
+        for k, v in qp.items():
+            st.query_params[k] = v
+
+        return decoded
+    except Exception as e:
+        st.warning(f"Auth token invalid/expired: {e}")
+        return None
+
+# IMPORTANT: call it so the token in the URL gets processed
+_ = get_firebase_user()
+
+def _maybe_handle_logout_flag():
+    if st.query_params.get("logout"):
+        st.session_state.pop("firebase_uid", None)
+        st.session_state.pop("firebase_email", None)
+        qp = dict(st.query_params)
+        qp.pop("logout", None)
+        st.query_params.clear()
+        for k, v in qp.items():
+            st.query_params[k] = v
+
+_maybe_handle_logout_flag()
+
 
 def _maybe_handle_logout_flag():
     # if the client added ?logout=1, clear server session and scrub URL
