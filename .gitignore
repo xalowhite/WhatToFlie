@@ -20,3 +20,4 @@ venv/
 
 # Logs / artifacts
 *.log
+**/.streamlit/secrets.toml
