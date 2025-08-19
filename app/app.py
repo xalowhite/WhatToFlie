@@ -1,3 +1,5 @@
+# Replace the top section of your app.py with this clean version
+
 import streamlit as st
 import pandas as pd
 import re
@@ -12,262 +14,309 @@ import requests
 import streamlit.components.v1 as components
 
 # =============================
-# App meta
+# App meta (MUST BE FIRST)
 # =============================
 st.set_page_config(page_title="🪶 Fly Tying Recommender", page_icon="🪶", layout="wide")
 
-APP_BUILD = "auth-inline-v1"
+APP_BUILD = "debug-v3"
 st.caption(f"Build: {APP_BUILD}")
 
 # =============================
-# Firebase Web SDK (for client-side Google sign-in)
+# Firebase Admin Setup (Clean)
+# =============================
+DB = None
+admin_auth = None
+
+try:
+    import firebase_admin
+    from firebase_admin import credentials, firestore, auth as admin_auth
+    
+    # Check if already initialized
+    if not firebase_admin._apps:
+        # Get service account from secrets
+        service_account_info = st.secrets.get("gcp_service_account")
+        if service_account_info:
+            # Convert service account info to the format Firebase expects
+            service_account_dict = dict(service_account_info)
+            cred = credentials.Certificate(service_account_dict)
+            firebase_admin.initialize_app(cred)
+            st.success("✅ Firebase Admin initialized successfully")
+        else:
+            st.error("❌ No Firebase service account found in secrets")
+    
+    # Initialize Firestore client
+    DB = firestore.client()
+    st.success("✅ Firestore client ready")
+    
+except ImportError:
+    st.error("❌ firebase-admin not installed")
+except Exception as e:
+    st.error(f"❌ Firebase initialization failed: {e}")
+    # Continue without Firebase for now
+
+# =============================
+# Firebase Web SDK Config
 # =============================
 FIREBASE_WEB_CONFIG = {
     "apiKey": "AIzaSyA_dlivqpvqiYQVp0AC-yF1ZTkDSjIxVuE",
     "authDomain": "whattoflie.firebaseapp.com",
     "projectId": "whattoflie",
-    # optional:
-    # "appId": "1:583146758929:web:2672bcb153f8cd7144e2b0",
-    # "measurementId": "G-BN561D813G",
 }
 
 def _firebase_config_js(cfg: dict) -> str:
-    # Serialize to a JS object literal
-    items = ",".join([f'{k}:"{v}"' for k, v in cfg.items()])
+    items = ",".join([f'"{k}":"{v}"' for k, v in cfg.items()])
     return "{" + items + "}"
 
+# =============================
+# Improved Google Sign-In
+# =============================
 def render_google_login_button():
+    """Render Google sign-in with comprehensive fallbacks"""
     components.html(f"""
-      <button id="google" style="padding:8px 12px;border-radius:8px;border:1px solid #ccc;cursor:pointer">
-        Sign in with Google
-      </button>
-      <script type="module">
-        import {{ initializeApp }} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-        import {{
-          getAuth, GoogleAuthProvider,
-          signInWithPopup, signInWithRedirect, getRedirectResult
-        }} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
-
-        const firebaseConfig = {_firebase_config_js(FIREBASE_WEB_CONFIG)};
-        const app = initializeApp(firebaseConfig);
-        const auth = getAuth(app);
-
-        async function finish(user) {{
-          const token = await user.getIdToken();
-          const uid = user.uid;
-          const email = encodeURIComponent(user.email || "");
-          const url = new URL(window.top.location.href);
-          url.searchParams.set("token", token);
-          url.searchParams.set("uid", uid);
-          url.searchParams.set("email", email);
-          window.top.location.href = url.toString();
-        }}
-
-        // complete a redirect sign-in if one just happened
-        getRedirectResult(auth).then(res => {{
-          if (res && res.user) finish(res.user);
-        }}).catch(()=>{{}});
-
-        document.getElementById("google").onclick = async () => {{
-          const provider = new GoogleAuthProvider();
-          try {{
-            const result = await signInWithPopup(auth, provider);
-            await finish(result.user);
-          }} catch (e) {{
-            // fallback if popup blocked
-            await signInWithRedirect(auth, provider);
-          }}
-        }};
-      </script>
-    """, height=90)
+        <div style="text-align: center; padding: 20px;">
+            <button id="google-signin" style="
+                padding: 12px 24px; 
+                background: #4285f4; 
+                color: white; 
+                border: none; 
+                border-radius: 6px; 
+                cursor: pointer; 
+                font-size: 16px;
+                width: 250px;
+            ">
+                🔑 Sign in with Google
+            </button>
+            <div id="status" style="margin-top: 10px; color: #666; font-size: 14px;"></div>
+            <div id="debug" style="margin-top: 10px; color: #999; font-size: 12px;"></div>
+        </div>
+        
+        <script type="module">
+            console.log("Starting Firebase auth initialization...");
+            
+            const statusEl = document.getElementById("status");
+            const debugEl = document.getElementById("debug");
+            
+            statusEl.textContent = "Loading authentication...";
+            
+            try {{
+                // Import Firebase modules
+                const {{ initializeApp }} = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js");
+                const {{ 
+                    getAuth, 
+                    GoogleAuthProvider,
+                    signInWithPopup, 
+                    signInWithRedirect, 
+                    getRedirectResult 
+                }} = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js");
+                
+                debugEl.textContent = "Firebase modules loaded";
+                
+                // Initialize Firebase
+                const firebaseConfig = {_firebase_config_js(FIREBASE_WEB_CONFIG)};
+                const app = initializeApp(firebaseConfig);
+                const auth = getAuth(app);
+                const provider = new GoogleAuthProvider();
+                
+                debugEl.textContent = "Firebase initialized, checking redirect result...";
+                
+                // Check for redirect result on page load
+                try {{
+                    const result = await getRedirectResult(auth);
+                    if (result && result.user) {{
+                        debugEl.textContent = "Found redirect result, processing...";
+                        await handleAuthSuccess(result.user);
+                        return;
+                    }}
+                }} catch (redirectError) {{
+                    console.error("Redirect result error:", redirectError);
+                    debugEl.textContent = "Redirect check failed: " + redirectError.message;
+                }}
+                
+                statusEl.textContent = "Ready to sign in";
+                debugEl.textContent = "Click button to authenticate";
+                
+                // Handle sign-in button click
+                document.getElementById("google-signin").onclick = async () => {{
+                    statusEl.textContent = "Starting sign-in...";
+                    debugEl.textContent = "Attempting popup authentication...";
+                    
+                    try {{
+                        // Try popup first
+                        const result = await signInWithPopup(auth, provider);
+                        debugEl.textContent = "Popup success, processing token...";
+                        await handleAuthSuccess(result.user);
+                    }} catch (popupError) {{
+                        console.error("Popup sign-in failed:", popupError);
+                        debugEl.textContent = "Popup failed: " + popupError.code + ", trying redirect...";
+                        
+                        // Fallback to redirect
+                        try {{
+                            statusEl.textContent = "Redirecting to Google...";
+                            await signInWithRedirect(auth, provider);
+                        }} catch (redirectError) {{
+                            console.error("Redirect sign-in failed:", redirectError);
+                            statusEl.textContent = "Sign-in failed";
+                            debugEl.textContent = "Both popup and redirect failed: " + redirectError.message;
+                        }}
+                    }}
+                }};
+                
+                async function handleAuthSuccess(user) {{
+                    try {{
+                        statusEl.textContent = "Getting authentication token...";
+                        const token = await user.getIdToken();
+                        
+                        debugEl.textContent = "Token received, redirecting...";
+                        
+                        // Build redirect URL
+                        const url = new URL(window.location.href);
+                        url.searchParams.set("token", token);
+                        url.searchParams.set("uid", user.uid);
+                        url.searchParams.set("email", encodeURIComponent(user.email || ""));
+                        
+                        statusEl.textContent = "Completing sign-in...";
+                        
+                        // Redirect to complete auth
+                        window.location.href = url.toString();
+                        
+                    }} catch (tokenError) {{
+                        console.error("Token error:", tokenError);
+                        statusEl.textContent = "Authentication failed";
+                        debugEl.textContent = "Token error: " + tokenError.message;
+                    }}
+                }}
+                
+            }} catch (importError) {{
+                console.error("Firebase import error:", importError);
+                statusEl.textContent = "Authentication system unavailable";
+                debugEl.textContent = "Import error: " + importError.message;
+            }}
+        </script>
+    """, height=150)
 
 def render_google_signout_button():
+    """Render sign-out button"""
     components.html(f"""
-      <button id="logout" style="padding:6px 10px;border-radius:8px;border:1px solid #ccc;cursor:pointer">
-        Sign out
-      </button>
-      <script type="module">
-        import {{ initializeApp }} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-        import {{ getAuth, signOut }} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
-
-        const firebaseConfig = {_firebase_config_js(FIREBASE_WEB_CONFIG)};
-        const app = initializeApp(firebaseConfig);
-        const auth = getAuth(app);
-
-        document.getElementById("logout").onclick = async () => {{
-          try {{ await signOut(auth); }} catch (e) {{}}
-          const url = new URL(window.top.location.href);
-          // tell the server to clear its session_state
-          url.searchParams.set("logout", "1");
-          // also strip any prior auth params
-          url.searchParams.delete("token");
-          url.searchParams.delete("uid");
-          url.searchParams.delete("email");
-          window.top.location.href = url.toString();
-        }};
-      </script>
+        <div style="text-align: center; padding: 10px;">
+            <button id="logout" style="
+                padding: 8px 16px;
+                background: #dc3545;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 14px;
+            ">
+                Sign out
+            </button>
+        </div>
+        
+        <script type="module">
+            document.getElementById("logout").onclick = () => {{
+                // Clear session and redirect
+                const url = new URL(window.location.href);
+                url.searchParams.set("logout", "1");
+                url.searchParams.delete("token");
+                url.searchParams.delete("uid"); 
+                url.searchParams.delete("email");
+                window.location.href = url.toString();
+            }};
+        </script>
     """, height=70)
 
 # =============================
-# Optional: Access gate for private beta
+# Authentication Processing
 # =============================
-APP_PASSCODE = st.secrets.get("app_passcode", "")
-if APP_PASSCODE:
-    code = st.text_input("Access code", type="password")
-    if code != APP_PASSCODE:
-        st.stop()
-
-# =============================
-# ---- Firebase Admin: verify ID token & Firestore ----
-try:
-    from firebase_admin import auth as admin_auth
-except Exception:
-    admin_auth = None
-
 def get_firebase_user():
-    """Verify ?token=... and cache uid/email in session; then strip token from the URL."""
+    """Process authentication token from URL parameters"""
     if admin_auth is None:
-        # Server missing firebase_admin or not initialized with a service account
-        st.info("Server auth not configured (firebase_admin missing or not initialized). Sign-in will be ignored.")
         return None
 
-    tok = st.query_params.get("token", "")
-    if isinstance(tok, list):
-        tok = tok[0] if tok else ""
-    if not tok:
+    # Get token from URL parameters
+    token = st.query_params.get("token", "")
+    if isinstance(token, list):
+        token = token[0] if token else ""
+    
+    if not token:
         return None
 
     try:
-        decoded = admin_auth.verify_id_token(tok)
-        st.session_state["firebase_uid"] = decoded.get("uid", "")
-        st.session_state["firebase_email"] = decoded.get("email", "")
-
-        # Scrub auth params so the token isn’t left in the URL
-        qp = dict(st.query_params)
-        for k in ("token", "uid", "email"):
-            qp.pop(k, None)
-        st.query_params.clear()
-        for k, v in qp.items():
-            st.query_params[k] = v
-
-        return decoded
+        # Verify the token with Firebase Admin
+        decoded_token = admin_auth.verify_id_token(token)
+        
+        # Store user info in session
+        st.session_state["firebase_uid"] = decoded_token.get("uid", "")
+        st.session_state["firebase_email"] = decoded_token.get("email", "")
+        
+        # Clean up URL parameters
+        clean_url()
+        
+        return decoded_token
+        
     except Exception as e:
-        st.warning(f"Auth token invalid/expired: {e}")
+        st.error(f"Authentication verification failed: {e}")
         return None
 
-def _maybe_handle_logout_flag():
-    # if the client added ?logout=1, clear server session and scrub URL
+def handle_logout():
+    """Handle logout request"""
     if st.query_params.get("logout"):
+        # Clear session state
         st.session_state.pop("firebase_uid", None)
         st.session_state.pop("firebase_email", None)
-        qp = dict(st.query_params)
-        qp.pop("logout", None)
-        st.query_params.clear()
-        for k, v in qp.items():
-            st.query_params[k] = v
+        
+        # Clean up URL
+        clean_url()
+        
+        st.rerun()
 
-# Process token (if present) and handle logout flag on every load
-_ = get_firebase_user()
-_maybe_handle_logout_flag()
+def clean_url():
+    """Clean authentication parameters from URL"""
+    # Get current params
+    current_params = dict(st.query_params)
+    
+    # Remove auth-related params
+    for key in ["token", "uid", "email", "logout"]:
+        current_params.pop(key, None)
+    
+    # Update URL
+    st.query_params.clear()
+    for key, value in current_params.items():
+        st.query_params[key] = value
 
-# (TEMP) Tiny debug caption so you can see what's happening; remove later.
-st.caption(f"dbg: uid={st.session_state.get('firebase_uid')} qp={list(st.query_params.keys())}")
+# =============================
+# Authentication Flow
+# =============================
+# Process any pending authentication
+handle_logout()
+user_data = get_firebase_user()
 
-# Render auth UI
+# Display authentication status
+st.markdown("### 🔐 Authentication Status")
+
 if st.session_state.get("firebase_uid"):
-    st.success(f"Signed in as {st.session_state.get('firebase_email','')} ✅")
+    user_email = st.session_state.get("firebase_email", "Unknown")
+    st.success(f"✅ Signed in as: {user_email}")
+    
+    # Show user info for debugging
+    with st.expander("Debug: User Info"):
+        st.json({
+            "uid": st.session_state.get("firebase_uid"),
+            "email": st.session_state.get("firebase_email"),
+            "db_available": DB is not None
+        })
+    
     render_google_signout_button()
 else:
-    st.info("🔐 Sign in to sync your inventory & prefs.")
+    st.info("🔑 Please sign in to sync your data across devices")
     render_google_login_button()
 
+# Debug current URL params
+if st.query_params:
+    with st.expander("Debug: URL Parameters"):
+        st.json(dict(st.query_params))
 
-
-def get_firebase_user():
-    """Verify ?token=... and cache uid/email in session; then strip token from the URL."""
-    # If the admin SDK isn’t available, we can’t verify tokens
-    if admin_auth is None:
-        st.info("Server auth not configured (firebase_admin missing or not initialized). Sign-in will be ignored.")
-        return None
-
-    tok = st.query_params.get("token", "")
-    if isinstance(tok, list):
-        tok = tok[0] if tok else ""
-    if not tok:
-        return None
-
-    try:
-        decoded = admin_auth.verify_id_token(tok)
-        st.session_state["firebase_uid"] = decoded.get("uid", "")
-        st.session_state["firebase_email"] = decoded.get("email", "")
-
-        # Scrub auth params so the token isn’t left in the URL
-        qp = dict(st.query_params)
-        for k in ("token", "uid", "email"):
-            qp.pop(k, None)
-        st.query_params.clear()
-        for k, v in qp.items():
-            st.query_params[k] = v
-
-        return decoded
-    except Exception as e:
-        st.warning(f"Auth token invalid/expired: {e}")
-        return None
-
-# IMPORTANT: call it so the token in the URL gets processed
-_ = get_firebase_user()
-
-def _maybe_handle_logout_flag():
-    if st.query_params.get("logout"):
-        st.session_state.pop("firebase_uid", None)
-        st.session_state.pop("firebase_email", None)
-        qp = dict(st.query_params)
-        qp.pop("logout", None)
-        st.query_params.clear()
-        for k, v in qp.items():
-            st.query_params[k] = v
-
-_maybe_handle_logout_flag()
-
-
-def _maybe_handle_logout_flag():
-    # if the client added ?logout=1, clear server session and scrub URL
-    if st.query_params.get("logout"):
-        st.session_state.pop("firebase_uid", None)
-        st.session_state.pop("firebase_email", None)
-        qp = dict(st.query_params)
-        qp.pop("logout", None)
-        st.query_params.clear()
-        for k, v in qp.items():
-            st.query_params[k] = v
-
-def get_firebase_user():
-    """Verify ?token=... and cache uid/email in session; then strip token from URL."""
-    if admin_auth is None:
-        return None
-    tok = st.query_params.get("token", "")
-    if isinstance(tok, list):
-        tok = tok[0] if tok else ""
-    if not tok:
-        return None
-    try:
-        decoded = admin_auth.verify_id_token(tok)
-        st.session_state["firebase_uid"] = decoded.get("uid", "")
-        st.session_state["firebase_email"] = decoded.get("email", "")
-    except Exception:
-        decoded = None  # bad/expired token
-
-    # Clean the URL so the token isn't leaked if copied/shared
-    qp = dict(st.query_params)
-    for k in ("token", "uid", "email"):
-        qp.pop(k, None)
-    st.query_params.clear()
-    for k, v in qp.items():
-        st.query_params[k] = v
-    return decoded
-
-_maybe_handle_logout_flag()
-_ = get_firebase_user()
+# Rest of your app code continues here...
+# (Keep all your existing functions and logic)
 
 # =============================
 # Legacy hashed ID helper + UID preference
@@ -280,15 +329,7 @@ def _effective_user_doc_id(user_id_fallback: str) -> str:
     uid = st.session_state.get("firebase_uid", "").strip()
     return uid or doc_id_for(user_id_fallback)
 
-# =============================
-# Auth status banner + buttons
-# =============================
-if st.session_state.get("firebase_uid"):
-    st.success(f"Signed in as {st.session_state.get('firebase_email','')} ✅")
-    render_google_signout_button()
-else:
-    st.info("🔐 Sign in to sync your inventory & prefs.")
-    render_google_login_button()
+
 
 # =============================
 # Helpers — normalization, parsing, matching
@@ -1332,31 +1373,52 @@ with cB:
             st.success("Loaded inventory from the cloud.")
             st.rerun()
 
+# Find this section around line 1335 in your app.py and replace it:
+
+# BEFORE (causing error):
 if DB is not None and st.session_state.get("account_id") and not st.session_state.get("did_auto_load"):
-    df_cloud = load_user_inventory(st.session_state["account_id"])
-    if isinstance(df_cloud, pd.DataFrame) and not df_cloud.empty:
-        expected = ["material", "status", "brand", "model"]
-        for col in expected:
-            if col not in df_cloud.columns:
-                df_cloud[col] = ""
-        st.session_state.inventory_df = df_cloud[expected].fillna("").drop_duplicates().reset_index(drop=True)
 
-    prefs = load_user_prefs(st.session_state["account_id"])
-    if prefs:
-        for k in ["pref_use_subs","pref_ignore_labels","pref_ignore_color","pref_size_tol","pref_require_len","pref_prefer_brands"]:
-            if k in prefs:
-                st.session_state[k] = prefs[k]
-        if "aliases_map" in prefs and isinstance(prefs["aliases_map"], dict):
-            aliases_map.update({str(k): str(v) for k, v in prefs["aliases_map"].items()})
-        if "subs_map" in prefs and isinstance(prefs["subs_map"], dict):
-            subs_map.clear()
-            for b, eqs in prefs["subs_map"].items():
-                subs_map[str(b)] = set(str(e) for e in (eqs or []))
-        if "brand_prefs" in prefs and isinstance(prefs["brand_prefs"], dict):
-            brand_prefs.update(prefs["brand_prefs"])
+# AFTER (fixed):
+if DB is not None and st.session_state.get("account_id") and not st.session_state.get("did_auto_load"):
+    try:
+        df_cloud = load_user_inventory(st.session_state["account_id"])
+        if isinstance(df_cloud, pd.DataFrame) and not df_cloud.empty:
+            expected = ["material", "status", "brand", "model"]
+            for col in expected:
+                if col not in df_cloud.columns:
+                    df_cloud[col] = ""
+            st.session_state.inventory_df = df_cloud[expected].fillna("").drop_duplicates().reset_index(drop=True)
 
-    st.session_state["did_auto_load"] = True
-    st.rerun()
+        prefs = load_user_prefs(st.session_state["account_id"])
+        if prefs:
+            for k in ["pref_use_subs","pref_ignore_labels","pref_ignore_color","pref_size_tol","pref_require_len","pref_prefer_brands"]:
+                if k in prefs:
+                    st.session_state[k] = prefs[k]
+            if "aliases_map" in prefs and isinstance(prefs["aliases_map"], dict):
+                aliases_map.update({str(k): str(v) for k, v in prefs["aliases_map"].items()})
+            if "subs_map" in prefs and isinstance(prefs["subs_map"], dict):
+                subs_map.clear()
+                for b, eqs in prefs["subs_map"].items():
+                    subs_map[str(b)] = set(str(e) for e in (eqs or []))
+            if "brand_prefs" in prefs and isinstance(prefs["brand_prefs"], dict):
+                brand_prefs.update(prefs["brand_prefs"])
+
+        st.session_state["did_auto_load"] = True
+        st.rerun()
+    except Exception as e:
+        st.warning(f"Auto-load failed: {e}")
+
+# Also find and replace all other DB references with safety checks:
+
+# Replace this pattern:
+DB.collection("users")...
+
+# With this pattern:
+if DB is not None:
+    DB.collection("users")...
+else:
+    st.warning("Database not available")
+    return False  # or appropriate fallback
 
 # Allow downloading the current flies
 if "flies_df" in locals():
