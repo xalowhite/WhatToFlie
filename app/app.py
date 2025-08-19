@@ -128,15 +128,8 @@ def render_google_signout_button():
         st.rerun()
 
 # =============================
-# Authentication Processing (FIXED)
+# Authentication Processing (FIXED - No Redirect Loop)
 # =============================
-def clean_url():
-    """Clean URL params without causing redirect loops"""
-    # Simply clear the auth params without updating
-    if any(param in st.query_params for param in ["token", "uid", "email", "logout"]):
-        # Use a simple clear instead of update
-        st.query_params.clear()
-
 def get_firebase_user():
     """Process Firebase authentication token from URL"""
     if admin_auth is None:
@@ -144,7 +137,8 @@ def get_firebase_user():
     
     # Check if we already have a user in session
     if st.session_state.get("firebase_uid"):
-        return None  # Already authenticated
+        # Already authenticated, don't process token again
+        return None
         
     token = st.query_params.get("token", "")
     if isinstance(token, list):
@@ -157,29 +151,23 @@ def get_firebase_user():
         st.session_state["firebase_uid"] = decoded_token.get("uid", "")
         st.session_state["firebase_email"] = decoded_token.get("email", "")
         
-        # Clean URL after successful authentication
-        # Don't use st.rerun() here
-        clean_url()
-        
+        # DON'T clean URL or rerun - just let it be
+        # The token in URL doesn't hurt anything
         return decoded_token
     except Exception as e:
         st.error(f"Authentication verification failed: {e}")
-        # Clean URL even on failure
-        clean_url()
         return None
 
 def handle_logout():
     """Handle user logout"""
-    if st.query_params.get("logout"):
+    if st.button("Sign out", key="signout_btn", type="secondary"):
         st.session_state.pop("firebase_uid", None)
         st.session_state.pop("firebase_email", None)
-        clean_url()
+        st.query_params.clear()
         st.rerun()
 
 # Process authentication
-handle_logout()
 _ = get_firebase_user()
-
 
 # Display authentication status
 st.markdown("### 🔐 Authentication Status")
@@ -194,7 +182,7 @@ if st.session_state.get("firebase_uid"):
                 "db_available": DB is not None,
             }
         )
-    render_google_signout_button()
+    handle_logout()  # This now handles the button internally
 else:
     st.info("🔑 Please sign in to sync your data across devices")
     render_google_login_button()
