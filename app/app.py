@@ -120,10 +120,13 @@ def render_google_login_popup():
 
           // Open a popup (works from sandboxed iframes if user-initiated)
           const w = window.open(
-            loginUrl,
-            'wtfLogin',
-            'width=520,height=700,menubar=0,toolbar=0,location=0,status=0,scrollbars=1,resizable=1'
-          );
+                    loginUrl,
+                    'wtfLogin',
+                    // add the last two flags:
+                    'width=520,height=700,menubar=0,toolbar=0,location=0,status=0,scrollbars=1,resizable=1,noopener=no,noreferrer=no'
+                    );
+                    try { if (w) w.focus(); } catch(_) {}
+
 
           // Listen for postMessage from the popup as a fast path
           function onMsg(ev) {
