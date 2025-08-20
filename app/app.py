@@ -85,85 +85,142 @@ FIREBASE_WEB_CONFIG = dict(st.secrets.get("firebase_web", {})) or {
 # =============================
 import streamlit.components.v1 as components
 
-def render_google_login_popup():
-    components.html("""
-    <button id="google-login-btn" style="padding:8px 12px;border-radius:8px;border:1px solid #ccc;cursor:pointer">
-      🔑 Sign in with Google
-    </button>
-    <div id="login-hint" style="margin-top:6px;font-size:12px;color:#666"></div>
-    <script>
-      (function () {
-        const btn = document.getElementById('google-login-btn');
-        const hint = document.getElementById('login-hint');
+# =============================
+# AUTH BLOCK (drop-in)
+# =============================
+import streamlit as st
+import os, json
+from urllib.parse import urlencode, urlparse
+import streamlit.components.v1 as components
 
-        function topHref() {
-          try { return window.top.location.href; } catch(_) { return window.location.href; }
-        }
-        function topOrigin() {
-          try { return new URL(topHref()).origin; } catch(_) { return window.location.origin; }
-        }
-        function topReturnTo() {
-          // Use origin + path of the top window; drop any existing query
-          try {
-            const u = new URL(topHref());
-            return u.origin + u.pathname;
-          } catch(_) { return topOrigin(); }
-        }
+# --- Ensure Firebase Admin is initialized (you already do this earlier) ---
+# Requires [gcp_service_account] in .streamlit/secrets.toml
+try:
+    import firebase_admin
+    from firebase_admin import credentials, auth as admin_auth, firestore
+    if not firebase_admin._apps:
+        service_account_info = st.secrets.get("gcp_service_account")
+        cred = credentials.Certificate(dict(service_account_info))
+        firebase_admin.initialize_app(cred)
+    DB = firestore.client()
+except Exception as e:
+    DB = None
+    st.error(f"Firebase Admin init error: {e}")
 
-        btn.addEventListener('click', () => {
-          const v = '12'; // bump to bust CDN cache on login.html
-          const loginUrl =
-            'https://whattoflie.web.app/login.html'
-            + '?v=' + encodeURIComponent(v)
-            + '&parent_origin=' + encodeURIComponent(topOrigin())
-            + '&return_to=' + encodeURIComponent(topReturnTo());
+# --- Config for login.html hosting ---
+LOGIN_HOST = "https://whattoflie.web.app/login.html"
 
-          // Open a popup (works from sandboxed iframes if user-initiated)
-          const w = window.open(
-                    loginUrl,
-                    'wtfLogin',
-                    // add the last two flags:
-                    'width=520,height=700,menubar=0,toolbar=0,location=0,status=0,scrollbars=1,resizable=1,noopener=no,noreferrer=no'
-                    );
-                    try { if (w) w.focus(); } catch(_) {}
+def _top_return_to() -> str:
+    """
+    Build origin+path for the top window, sans query.
+    Works in Streamlit cloud and localhost.
+    """
+    try:
+        # st.experimental_get_query_params deprecated on new; st.query_params exists
+        # We want the current page without query.
+        # Streamlit exposes the full URL in the browser; we reconstruct in JS for nav.
+        # Here we return a safe default (homepage) in case JS can't compute.
+        return "https://whattoflie.streamlit.app/"
+    except:
+        return "https://whattoflie.streamlit.app/"
 
+def sign_in_button():
+    """
+    Renders a button that does a top-level redirect to our hosted login page,
+    passing return_to=<this app URL w/o query>.
+    """
+    components.html(
+        f"""
+        <button id="signin-btn" style="padding:10px 14px;border-radius:8px;border:1px solid #ccc;cursor:pointer">
+          🔑 Sign in
+        </button>
+        <script>
+          (function() {{
+            function topHref() {{
+              try {{ return window.top.location.href; }} catch(e) {{ return window.location.href; }}
+            }}
+            function buildReturnTo() {{
+              try {{
+                const u = new URL(topHref());
+                return u.origin + u.pathname;
+              }} catch(e) {{
+                return {json.dumps(_top_return_to())};
+              }}
+            }}
+            document.getElementById('signin-btn').addEventListener('click', function() {{
+              const rt = buildReturnTo();
+              const url = new URL({json.dumps(LOGIN_HOST)});
+              url.searchParams.set('return_to', rt);
+              window.top.location.assign(url.toString());
+            }});
+          }})();
+        </script>
+        """,
+        height=60
+    )
 
-          // Listen for postMessage from the popup as a fast path
-          function onMsg(ev) {
-            try {
-              if (!ev || !ev.data || ev.data.type !== 'auth_success') return;
-              window.removeEventListener('message', onMsg);
+def _clean_auth_params():
+    # Remove sensitive params from URL after we store session
+    try:
+        for k in ("token", "uid", "email"):
+            if k in st.query_params:
+                del st.query_params[k]
+    except Exception:
+        pass
 
-              // Build a clean URL for the TOP window (origin + path only)
-              let returnTo = topReturnTo();
-              const u = new URL(returnTo);
-              u.searchParams.set('token', ev.data.token);
-              u.searchParams.set('uid', ev.data.uid);
-              if (ev.data.email) u.searchParams.set('email', ev.data.email);
+def process_auth_from_url():
+    """
+    If ?token=... is present (from login.html), verify it, store uid/email in session,
+    strip query params, and rerun for a clean state.
+    """
+    try:
+        token = st.query_params.get("token", "")
+        if isinstance(token, list):
+            token = token[0] if token else ""
+        if not token or "firebase_uid" in st.session_state:
+            return
 
-              try { if (w && !w.closed) w.close(); } catch(_) {}
-              // Navigate the top page
-              try { window.top.location.assign(u.toString()); }
-              catch(_) { window.location.assign(u.toString()); }
-            } catch (e) {
-              console.error(e);
-            }
-          }
+        decoded = admin_auth.verify_id_token(token)  # raises on invalid/expired
+        st.session_state["firebase_uid"] = decoded.get("uid", "")
+        st.session_state["firebase_email"] = decoded.get("email", "")
 
-          window.addEventListener('message', onMsg);
+        # Clean URL (remove token/email/uid) then rerun
+        _clean_auth_params()
+        st.rerun()
 
-          // Tiny UX hint in case a popup blocker is in the way
-          setTimeout(() => {
-            try {
-              if (!w || w.closed) {
-                hint.textContent = 'If nothing happens, allow popups for this site or open https://whattoflie.web.app/login.html manually.';
-              }
-            } catch(_) {}
-          }, 1200);
-        });
-      })();
-    </script>
-    """, height=84)
+    except Exception as e:
+        st.error(f"Sign-in failed: {e}")
+
+def sign_out_button():
+    if st.button("Sign out", type="secondary"):
+        st.session_state.pop("firebase_uid", None)
+        st.session_state.pop("firebase_email", None)
+        # Wipe query params entirely
+        try:
+            for k in list(st.query_params.keys()):
+                del st.query_params[k]
+        except Exception:
+            pass
+        st.rerun()
+
+# Run processing at load
+process_auth_from_url()
+
+# Show status
+st.markdown("### 🔐 Authentication")
+if st.session_state.get("firebase_uid"):
+    st.success(f"✅ Signed in as: {st.session_state.get('firebase_email','(no email)')}")
+    with st.expander("Debug (user)"):
+        st.json({
+            "uid": st.session_state.get("firebase_uid"),
+            "email": st.session_state.get("firebase_email"),
+            "db_available": bool(DB)
+        })
+    sign_out_button()
+else:
+    st.info("Sign in to sync your inventory across devices (Google or Email/Password).")
+    sign_in_button()
+
 
 
 # =============================
