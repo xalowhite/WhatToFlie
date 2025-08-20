@@ -86,10 +86,54 @@ FIREBASE_WEB_CONFIG = dict(st.secrets.get("firebase_web", {})) or {
 # Improved Google Sign-In
 # =============================
 def render_google_login_popup():
-    login_url = "https://whattoflie.web.app/login.html"
-    return_to = "https://whattoflie.streamlit.app/"
-    v = "6"  # bump on each deploy
-    st.link_button("🔑 Sign in with Google", f"{login_url}?v={v}&return_to={return_to}")
+    # We drop the link_button and use real JS popup + postMessage listener
+    # parent_origin: the Streamlit app's origin so the login page can post back safely
+    components.html(f"""
+    <button id="google-login-btn" style="padding:8px 12px;border-radius:8px;border:1px solid #ccc;cursor:pointer">
+      🔑 Sign in with Google
+    </button>
+    <script>
+      (function() {{
+        const btn = document.getElementById('google-login-btn');
+        btn.addEventListener('click', () => {{
+          const parentOrigin = new URL(window.location.href).origin;
+          const v = '9'; // cache buster — bump when you redeploy login.html
+          const loginUrl =
+            'https://whattoflie.web.app/login.html' +
+            '?v=' + encodeURIComponent(v) +
+            '&parent_origin=' + encodeURIComponent(parentOrigin) +
+            '&return_to=' + encodeURIComponent(window.location.origin + window.location.pathname);
+
+          // Open popup
+          const w = window.open(
+            loginUrl,
+            'wtfLogin',
+            'width=520,height=700,menubar=0,toolbar=0,location=0,status=0,scrollbars=1,resizable=1'
+          );
+
+          function onMsg(ev) {{
+            // Optionally restrict origin (uncomment to enforce):
+            // if (ev.origin !== 'https://whattoflie.web.app') return;
+
+            if (!ev || !ev.data || ev.data.type !== 'auth_success') return;
+
+            const u = new URL(window.location.href);
+            u.searchParams.set('token', ev.data.token);
+            u.searchParams.set('uid', ev.data.uid);
+            u.searchParams.set('email', ev.data.email);
+
+            window.removeEventListener('message', onMsg);
+            try {{ if (w && !w.closed) w.close(); }} catch (e) {{}}
+
+            // Replace current URL (avoids duplicate history entry)
+            window.location.replace(u.toString());
+          }}
+
+          window.addEventListener('message', onMsg);
+        }});
+      }})();
+    </script>
+    """, height=70)
 
 
 
