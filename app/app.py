@@ -17,17 +17,12 @@ import streamlit.components.v1 as components
 # =============================
 st.set_page_config(page_title="🪶 Fly Tying Recommender", page_icon="🪶", layout="wide")
 
-APP_BUILD = "debug-v3"
+APP_BUILD = "auth-v4"
 st.caption(f"Build: {APP_BUILD}")
 
-if "page_loads" not in st.session_state:
-    st.session_state["page_loads"] = 0
-st.session_state["page_loads"] += 1
-
-st.write(f"DEBUG: Page load count: {st.session_state['page_loads']}")
-st.write(f"DEBUG: Has token in URL: {'token' in st.query_params}")
-st.write(f"DEBUG: Already authenticated: {bool(st.session_state.get('firebase_uid'))}")
-
+# =============================
+# GitHub Raw helper
+# =============================
 @st.cache_data
 def gh_url(path: str) -> str | None:
     """Build a Raw GitHub URL from .streamlit/secrets.toml [github].raw_base or env GITHUB_RAW_BASE."""
@@ -46,11 +41,10 @@ def gh_url(path: str) -> str | None:
 
 
 # =============================
-# Firebase Admin Setup (Clean)
+# Firebase Admin Setup (single source of truth)
 # =============================
 DB = None
 admin_auth = None
-
 try:
     import firebase_admin
     from firebase_admin import credentials, firestore, auth as admin_auth
@@ -70,64 +64,18 @@ except ImportError:
 except Exception as e:
     st.error(f"❌ Firebase initialization failed: {e}")
 
-# =============================
-# Firebase Web SDK Config (for client login page)
-# =============================
-FIREBASE_WEB_CONFIG = dict(st.secrets.get("firebase_web", {})) or {
-    "apiKey": "AIzaSyA_dlivqpvqiYQVp0AC-yF1ZTkDSjIxVuE",
-    "authDomain": "whattoflie.firebaseapp.com",
-    "projectId": "whattoflie",
-    # Optional keys (appId, storageBucket, etc.) may be present in secrets
-}
 
 # =============================
-# Google Sign-In (Redirect flow; no popup)
+# AUTH BLOCK (redirect to hosted login.html)
 # =============================
-import streamlit.components.v1 as components
+from urllib.parse import urlencode
 
-# =============================
-# AUTH BLOCK (drop-in)
-# =============================
-import streamlit as st
-import os, json
-from urllib.parse import urlencode, urlparse
-import streamlit.components.v1 as components
-
-# --- Ensure Firebase Admin is initialized (you already do this earlier) ---
-# Requires [gcp_service_account] in .streamlit/secrets.toml
-try:
-    import firebase_admin
-    from firebase_admin import credentials, auth as admin_auth, firestore
-    if not firebase_admin._apps:
-        service_account_info = st.secrets.get("gcp_service_account")
-        cred = credentials.Certificate(dict(service_account_info))
-        firebase_admin.initialize_app(cred)
-    DB = firestore.client()
-except Exception as e:
-    DB = None
-    st.error(f"Firebase Admin init error: {e}")
-
-# --- Config for login.html hosting ---
 LOGIN_HOST = "https://whattoflie.web.app/login.html"
-
-def _top_return_to() -> str:
-    """
-    Build origin+path for the top window, sans query.
-    Works in Streamlit cloud and localhost.
-    """
-    try:
-        # st.experimental_get_query_params deprecated on new; st.query_params exists
-        # We want the current page without query.
-        # Streamlit exposes the full URL in the browser; we reconstruct in JS for nav.
-        # Here we return a safe default (homepage) in case JS can't compute.
-        return "https://whattoflie.streamlit.app/"
-    except:
-        return "https://whattoflie.streamlit.app/"
 
 def sign_in_button():
     """
-    Renders a button that does a top-level redirect to our hosted login page,
-    passing return_to=<this app URL w/o query>.
+    Renders a button that redirects the TOP window to login.html,
+    passing return_to=<this app URL (origin+path) without query>.
     """
     components.html(
         f"""
@@ -144,7 +92,7 @@ def sign_in_button():
                 const u = new URL(topHref());
                 return u.origin + u.pathname;
               }} catch(e) {{
-                return {json.dumps(_top_return_to())};
+                return "https://whattoflie.streamlit.app/";
               }}
             }}
             document.getElementById('signin-btn').addEventListener('click', function() {{
@@ -174,6 +122,8 @@ def process_auth_from_url():
     strip query params, and rerun for a clean state.
     """
     try:
+        if admin_auth is None:
+            return
         token = st.query_params.get("token", "")
         if isinstance(token, list):
             token = token[0] if token else ""
@@ -203,86 +153,16 @@ def sign_out_button():
             pass
         st.rerun()
 
-# Run processing at load
+# Process auth immediately so state is clean for the rest of the app
 process_auth_from_url()
 
-# Show status
-st.markdown("### 🔐 Authentication")
-if st.session_state.get("firebase_uid"):
-    st.success(f"✅ Signed in as: {st.session_state.get('firebase_email','(no email)')}")
-    with st.expander("Debug (user)"):
-        st.json({
-            "uid": st.session_state.get("firebase_uid"),
-            "email": st.session_state.get("firebase_email"),
-            "db_available": bool(DB)
-        })
-    sign_out_button()
-else:
-    st.info("Sign in to sync your inventory across devices (Google or Email/Password).")
-    sign_in_button()
-
-
-
-# =============================
-# Authentication Processing (no redirect loop)
-# =============================
-def get_firebase_user():
-    """Process Firebase authentication token from URL; set session; clean URL; rerun."""
-    if admin_auth is None:
-        return None
-
-    # Already authenticated? Nothing to do.
-    if st.session_state.get("firebase_uid"):
-        return None
-
-    # Extract token from URL (Streamlit's query_params can be list-like)
-    token = st.query_params.get("token", "")
-    if isinstance(token, list):
-        token = token[0] if token else ""
-    if not token:
-        return None
-
-    try:
-        decoded_token = admin_auth.verify_id_token(token)
-        st.session_state["firebase_uid"] = decoded_token.get("uid", "")
-        st.session_state["firebase_email"] = decoded_token.get("email", "")
-
-        # Clean URL now that we have the token
-        for k in ("token", "uid", "email"):
-            if k in st.query_params:
-                del st.query_params[k]
-
-        # Force a clean rerun without sensitive params in the URL/debug
-        st.rerun()
-    except Exception as e:
-        st.error(f"Authentication verification failed: {e}")
-        return None
-
-
-def handle_logout():
-    if st.button("Sign out", key="signout_btn", type="secondary"):
-        # Clear user session info
-        st.session_state.pop("firebase_uid", None)
-        st.session_state.pop("firebase_email", None)
-        # Remove all query parameters from the URL
-        try:
-            st.experimental_set_query_params()  # works across Streamlit versions
-        except Exception:
-            # As of newer Streamlit, st.query_params is mutable
-            for k in list(st.query_params.keys()):
-                del st.query_params[k]
-        # Rerun the app to apply changes
-        st.rerun()
-
-
-# Process authentication on load
-_ = get_firebase_user()
-
-# Clean auth params from URL once signed in (idempotent)
-if st.session_state.get("firebase_uid"):
-    for k in ("token", "uid", "email"):
-        if k in st.query_params:
-            del st.query_params[k]
+# Simple debug counters (after auth processing)
+if "page_loads" not in st.session_state:
+    st.session_state["page_loads"] = 0
+st.session_state["page_loads"] += 1
+st.write(f"DEBUG: Page load count: {st.session_state['page_loads']}")
+st.write(f"DEBUG: Has token in URL: {'token' in st.query_params}")
+st.write(f"DEBUG: Already authenticated: {bool(st.session_state.get('firebase_uid'))}")
 
 # =============================
 # UI — Hero
@@ -298,27 +178,21 @@ st.markdown(
 )
 
 # =============================
-# Auth status header
+# Authentication UI (single source)
 # =============================
-st.markdown("### 🔐 Authentication Status")
+st.markdown("### 🔐 Authentication")
 if st.session_state.get("firebase_uid"):
-    user_email = st.session_state.get("firebase_email", "Unknown")
-    st.success(f"✅ Signed in as: {user_email}")
-    with st.expander("Debug: User Info"):
-        st.json({"uid": st.session_state.get("firebase_uid"),
-                 "email": st.session_state.get("firebase_email"),
-                 "db_available": DB is not None})
-    handle_logout()
+    st.success(f"✅ Signed in as: {st.session_state.get('firebase_email','(no email)')}")
+    with st.expander("Debug (user)"):
+        st.json({
+            "uid": st.session_state.get("firebase_uid"),
+            "email": st.session_state.get("firebase_email"),
+            "db_available": DB is not None
+        })
+    sign_out_button()
 else:
-    st.info("🔑 Please sign in to sync your data across devices")
+    st.info("Sign in to sync your inventory across devices (Google or Email/Password).")
     sign_in_button()
-
-
-
-# Debug current URL params (optional)
-if st.query_params:
-    with st.expander("Debug: URL Parameters"):
-        st.json(dict(st.query_params))
 
 # =============================
 # Legacy hashed ID helper + UID preference
@@ -332,7 +206,7 @@ def _effective_user_doc_id(user_id_fallback: str) -> str:
     return uid or doc_id_for(user_id_fallback)
 
 # =============================
-# GitHub & local loaders (NO gh_url dependency)
+# GitHub & local loaders
 # =============================
 @st.cache_data
 def read_csv_from_github(path: str, *, sep=",") -> pd.DataFrame:
@@ -1910,7 +1784,7 @@ if st.session_state.matches_df is not None:
                 z.writestr("inventory_step3.csv", inv_full_df_from_step3.to_csv(index=False))
             if not st.session_state.inventory_df.empty:
                 z.writestr("inventory_editor.csv", st.session_state.inventory_df.to_csv(index=False))
-            z.writestr("flies.csv", flies_df.to_csv(index=False))
+            z.writestr("flies.csv", locals()["flies_df"].to_csv(index=False))
             opts = {
                 "use_subs": bool(locals().get("use_subs", True)),
                 "ignore_labels": bool(locals().get("ignore_labels", True)),
@@ -1957,3 +1831,4 @@ if st.session_state.matches_df is not None:
         )
 else:
     st.info("Click **Run matching** to see your results.")
+
