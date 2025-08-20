@@ -12,7 +12,6 @@ from urllib.error import URLError
 import requests
 import streamlit.components.v1 as components
 
-
 # =============================
 # App meta (MUST BE FIRST)
 # =============================
@@ -32,7 +31,6 @@ st.write(f"DEBUG: Already authenticated: {bool(st.session_state.get('firebase_ui
 @st.cache_data
 def gh_url(path: str) -> str | None:
     """Build a Raw GitHub URL from .streamlit/secrets.toml [github].raw_base or env GITHUB_RAW_BASE."""
-    import os
     try:
         base = None
         gh = st.secrets.get("github", {})
@@ -73,7 +71,7 @@ except Exception as e:
     st.error(f"❌ Firebase initialization failed: {e}")
 
 # =============================
-# Firebase Web SDK Config
+# Firebase Web SDK Config (for client login page)
 # =============================
 FIREBASE_WEB_CONFIG = dict(st.secrets.get("firebase_web", {})) or {
     "apiKey": "AIzaSyA_dlivqpvqiYQVp0AC-yF1ZTkDSjIxVuE",
@@ -83,61 +81,8 @@ FIREBASE_WEB_CONFIG = dict(st.secrets.get("firebase_web", {})) or {
 }
 
 # =============================
-# Improved Google Sign-In
+# Google Sign-In (Redirect flow; no popup)
 # =============================
-def render_google_login_redirect():
-    components.html(f"""
-    <button id="google-login-btn" style="padding:8px 12px;border-radius:8px;border:1px solid #ccc;cursor:pointer">
-      🔑 Sign in with Google
-    </button>
-    <script>
-      (function() {{
-        const btn = document.getElementById('google-login-btn');
-        btn.addEventListener('click', () => {{
-          // Use the *top-level* origin when possible
-          let parentOrigin = '*';
-          try {{ parentOrigin = new URL(window.parent.location.href).origin; }}
-          catch (e) {{ try {{ parentOrigin = new URL(window.location.href).origin; }} catch(e2) {{}} }}
-
-          const v = '10'; // bump when redeploying login.html to bust cache
-          const loginUrl =
-            'https://whattoflie.web.app/login.html' +
-            '?v=' + encodeURIComponent(v) +
-            '&parent_origin=' + encodeURIComponent(parentOrigin) +
-            '&return_to=' + encodeURIComponent(window.parent.location.origin + window.parent.location.pathname);
-
-          const w = window.open(
-            loginUrl,
-            'wtfLogin',
-            'width=520,height=700,menubar=0,toolbar=0,location=0,status=0,scrollbars=1,resizable=1'
-          );
-
-          function onMsg(ev) {{
-            if (!ev || !ev.data || ev.data.type !== 'auth_success') return;
-
-            // Build URL from the *parent* page
-            let href = '';
-            try {{ href = window.parent.location.href; }} catch(_) {{ href = window.location.href; }}
-            const u = new URL(href);
-            u.searchParams.set('token', ev.data.token);
-            u.searchParams.set('uid', ev.data.uid);
-            u.searchParams.set('email', ev.data.email);
-
-            window.removeEventListener('message', onMsg);
-            try {{ if (w && !w.closed) w.close(); }} catch (e) {{}}
-
-            // ✅ Navigate the parent page, not the iframe
-            try {{ window.parent.location.replace(u.toString()); }}
-            catch (e) {{ window.location.replace(u.toString()); }}
-          }}
-
-          window.addEventListener('message', onMsg);
-        }});
-      }})();
-    </script>
-    """, height=70)
-
-
 def render_google_login_redirect():
     components.html("""
     <button id="google-login-redirect" style="padding:8px 12px;border-radius:8px;border:1px solid #ccc;cursor:pointer">
@@ -147,25 +92,25 @@ def render_google_login_redirect():
       (function () {
         const btn = document.getElementById('google-login-redirect');
         btn.addEventListener('click', () => {
+          // Find the TOP window URL (outside the Streamlit iframe)
           let topHref = '';
           try { topHref = window.top.location.href; } catch(_) { topHref = window.location.href; }
-          let origin = '';
-          try { origin = new URL(topHref).origin; } catch(_) { origin = window.location.origin; }
 
-          // Build the return URL to your Streamlit app (top-level)
-          let returnTo = origin;
+          let returnTo = '';
           try {
             const u = new URL(topHref);
-            // Keep path only; drop existing query to avoid leaking stale params
+            // Keep origin+path only; drop any existing query to avoid leaking stale params
             returnTo = u.origin + u.pathname;
-          } catch(_) {}
+          } catch(_) {
+            returnTo = window.location.origin;
+          }
 
-          const v = '11'; // bump to bust CDN cache on login.html
+          const v = '11'; // cache-buster for login.html
           const loginUrl = 'https://whattoflie.web.app/login.html'
             + '?v=' + encodeURIComponent(v)
             + '&return_to=' + encodeURIComponent(returnTo);
 
-          // Navigate the TOP window to login.html (no popup)
+          // Navigate the TOP window (no popup)
           try { window.top.location.assign(loginUrl); }
           catch(_) { window.location.assign(loginUrl); }
         });
@@ -174,32 +119,39 @@ def render_google_login_redirect():
     """, height=70)
 
 # =============================
-# Authentication Processing (FIXED - No Redirect Loop)
+# Authentication Processing (no redirect loop)
 # =============================
 def get_firebase_user():
+    """Process Firebase authentication token from URL; set session; clean URL; rerun."""
     if admin_auth is None:
         return None
+
+    # Already authenticated? Nothing to do.
     if st.session_state.get("firebase_uid"):
         return None
+
+    # Extract token from URL (Streamlit's query_params can be list-like)
     token = st.query_params.get("token", "")
     if isinstance(token, list):
         token = token[0] if token else ""
     if not token:
         return None
+
     try:
         decoded_token = admin_auth.verify_id_token(token)
         st.session_state["firebase_uid"] = decoded_token.get("uid", "")
         st.session_state["firebase_email"] = decoded_token.get("email", "")
-        # Clean URL now that we have it
-        for k in ("token","uid","email"):
+
+        # Clean URL now that we have the token
+        for k in ("token", "uid", "email"):
             if k in st.query_params:
                 del st.query_params[k]
+
         # Force a clean rerun without sensitive params in the URL/debug
         st.rerun()
     except Exception as e:
         st.error(f"Authentication verification failed: {e}")
         return None
-
 
 
 def handle_logout():
@@ -208,22 +160,41 @@ def handle_logout():
         st.session_state.pop("firebase_uid", None)
         st.session_state.pop("firebase_email", None)
         # Remove all query parameters from the URL
-        st.experimental_set_query_params()
+        try:
+            st.experimental_set_query_params()  # works across Streamlit versions
+        except Exception:
+            # As of newer Streamlit, st.query_params is mutable
+            for k in list(st.query_params.keys()):
+                del st.query_params[k]
         # Rerun the app to apply changes
         st.rerun()
 
 
-# Process authentication
+# Process authentication on load
 _ = get_firebase_user()
 
-# Clean auth params from URL once signed in
+# Clean auth params from URL once signed in (idempotent)
 if st.session_state.get("firebase_uid"):
     for k in ("token", "uid", "email"):
         if k in st.query_params:
             del st.query_params[k]
 
+# =============================
+# UI — Hero
+# =============================
+st.markdown(
+    """
+    <div style="padding: 1.2rem; border-radius: 16px; background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); color: #e2e8f0; border: 1px solid #334155;">
+      <h1 style="margin: 0 0 .4rem 0; font-size: 1.8rem;">🪶 Fly Tying Recommender</h1>
+      <p style="margin: 0;">See what you can tie now, what you're 1–2 items away from, and what to buy next — with brand/model preferences for hooks.</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
-# Display authentication status
+# =============================
+# Auth status header
+# =============================
 st.markdown("### 🔐 Authentication Status")
 if st.session_state.get("firebase_uid"):
     user_email = st.session_state.get("firebase_email", "Unknown")
@@ -236,12 +207,13 @@ if st.session_state.get("firebase_uid"):
                 "db_available": DB is not None,
             }
         )
-    handle_logout()  # This now handles the button internally
+    handle_logout()
 else:
     st.info("🔑 Please sign in to sync your data across devices")
-    render_google_login_popup()
-    
-# Debug current URL params
+    # IMPORTANT: use the redirect version (no popup)
+    render_google_login_redirect()
+
+# Debug current URL params (optional)
 if st.query_params:
     with st.expander("Debug: URL Parameters"):
         st.json(dict(st.query_params))
@@ -821,19 +793,6 @@ def normalize_inventory_entry(material_name: str, brand: str = "", model: str = 
     return final_material, final_brand, final_model
 
 # =============================
-# UI — Hero
-# =============================
-st.markdown(
-    """
-    <div style="padding: 1.2rem; border-radius: 16px; background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); color: #e2e8f0; border: 1px solid #334155;">
-      <h1 style="margin: 0 0 .4rem 0; font-size: 1.8rem;">🪶 Fly Tying Recommender</h1>
-      <p style="margin: 0;">See what you can tie now, what you're 1–2 items away from, and what to buy next — with brand/model preferences for hooks.</p>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-# =============================
 # Sidebar — onboarding & data sources
 # =============================
 with st.sidebar:
@@ -1081,7 +1040,6 @@ if "inventory_df" not in st.session_state:
     st.session_state.inventory_df = pd.DataFrame(columns=["material", "status", "brand", "model"])
 if "matches_df" not in st.session_state:
     st.session_state.matches_df = None
-
 if "matches_sim" not in st.session_state:
     st.session_state.matches_sim = None
 
@@ -1206,7 +1164,6 @@ def set_account_id():
         if "acct" in st.query_params:
             del st.query_params["acct"]
 
-
 st.markdown("### ☁️ Cloud preferences")
 acct_id_prefs = st.text_input(
     "Account ID for preferences (use the same as Cloud sync above)",
@@ -1239,7 +1196,6 @@ def load_user_inventory() -> pd.DataFrame | None:
     except Exception as e:
         st.error(f"Failed to load inventory: {e}")
         return None
-
 
 def save_user_prefs(user_id: str, prefs: dict) -> bool:
     if DB is None:
@@ -1518,7 +1474,7 @@ if st.button("🧹 Clear results / start fresh"):
     st.session_state.matches_df = None
     st.session_state.matches_sim = None
     st.rerun()
-    
+
 # =============================
 # Results & tools (Display Logic)
 # =============================
@@ -1899,4 +1855,3 @@ if st.session_state.matches_df is not None:
         )
 else:
     st.info("Click **Run matching** to see your results.")
-
