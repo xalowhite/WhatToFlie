@@ -85,7 +85,7 @@ FIREBASE_WEB_CONFIG = dict(st.secrets.get("firebase_web", {})) or {
 # =============================
 # Improved Google Sign-In
 # =============================
-def render_google_login_popup():
+def render_google_login_redirect():
     components.html(f"""
     <button id="google-login-btn" style="padding:8px 12px;border-radius:8px;border:1px solid #ccc;cursor:pointer">
       🔑 Sign in with Google
@@ -138,34 +138,68 @@ def render_google_login_popup():
     """, height=70)
 
 
+def render_google_login_redirect():
+    components.html("""
+    <button id="google-login-redirect" style="padding:8px 12px;border-radius:8px;border:1px solid #ccc;cursor:pointer">
+      🔑 Sign in with Google
+    </button>
+    <script>
+      (function () {
+        const btn = document.getElementById('google-login-redirect');
+        btn.addEventListener('click', () => {
+          let topHref = '';
+          try { topHref = window.top.location.href; } catch(_) { topHref = window.location.href; }
+          let origin = '';
+          try { origin = new URL(topHref).origin; } catch(_) { origin = window.location.origin; }
+
+          // Build the return URL to your Streamlit app (top-level)
+          let returnTo = origin;
+          try {
+            const u = new URL(topHref);
+            // Keep path only; drop existing query to avoid leaking stale params
+            returnTo = u.origin + u.pathname;
+          } catch(_) {}
+
+          const v = '11'; // bump to bust CDN cache on login.html
+          const loginUrl = 'https://whattoflie.web.app/login.html'
+            + '?v=' + encodeURIComponent(v)
+            + '&return_to=' + encodeURIComponent(returnTo);
+
+          // Navigate the TOP window to login.html (no popup)
+          try { window.top.location.assign(loginUrl); }
+          catch(_) { window.location.assign(loginUrl); }
+        });
+      })();
+    </script>
+    """, height=70)
 
 # =============================
 # Authentication Processing (FIXED - No Redirect Loop)
 # =============================
 def get_firebase_user():
-    """Process Firebase authentication token from URL."""
     if admin_auth is None:
         return None
-
-    # Already authenticated? Nothing to do.
     if st.session_state.get("firebase_uid"):
         return None
-
-    # Extract token from URL
     token = st.query_params.get("token", "")
     if isinstance(token, list):
         token = token[0] if token else ""
     if not token:
         return None
-
     try:
         decoded_token = admin_auth.verify_id_token(token)
         st.session_state["firebase_uid"] = decoded_token.get("uid", "")
         st.session_state["firebase_email"] = decoded_token.get("email", "")
-        return decoded_token
+        # Clean URL now that we have it
+        for k in ("token","uid","email"):
+            if k in st.query_params:
+                del st.query_params[k]
+        # Force a clean rerun without sensitive params in the URL/debug
+        st.rerun()
     except Exception as e:
         st.error(f"Authentication verification failed: {e}")
         return None
+
 
 
 def handle_logout():
