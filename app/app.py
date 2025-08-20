@@ -86,8 +86,6 @@ FIREBASE_WEB_CONFIG = dict(st.secrets.get("firebase_web", {})) or {
 # Improved Google Sign-In
 # =============================
 def render_google_login_popup():
-    # We drop the link_button and use real JS popup + postMessage listener
-    # parent_origin: the Streamlit app's origin so the login page can post back safely
     components.html(f"""
     <button id="google-login-btn" style="padding:8px 12px;border-radius:8px;border:1px solid #ccc;cursor:pointer">
       🔑 Sign in with Google
@@ -96,15 +94,18 @@ def render_google_login_popup():
       (function() {{
         const btn = document.getElementById('google-login-btn');
         btn.addEventListener('click', () => {{
-          const parentOrigin = new URL(window.location.href).origin;
-          const v = '9'; // cache buster — bump when you redeploy login.html
+          // Use the *top-level* origin when possible
+          let parentOrigin = '*';
+          try {{ parentOrigin = new URL(window.parent.location.href).origin; }}
+          catch (e) {{ try {{ parentOrigin = new URL(window.location.href).origin; }} catch(e2) {{}} }}
+
+          const v = '10'; // bump when redeploying login.html to bust cache
           const loginUrl =
             'https://whattoflie.web.app/login.html' +
             '?v=' + encodeURIComponent(v) +
             '&parent_origin=' + encodeURIComponent(parentOrigin) +
-            '&return_to=' + encodeURIComponent(window.location.origin + window.location.pathname);
+            '&return_to=' + encodeURIComponent(window.parent.location.origin + window.parent.location.pathname);
 
-          // Open popup
           const w = window.open(
             loginUrl,
             'wtfLogin',
@@ -112,12 +113,12 @@ def render_google_login_popup():
           );
 
           function onMsg(ev) {{
-            // Optionally restrict origin (uncomment to enforce):
-            // if (ev.origin !== 'https://whattoflie.web.app') return;
-
             if (!ev || !ev.data || ev.data.type !== 'auth_success') return;
 
-            const u = new URL(window.location.href);
+            // Build URL from the *parent* page
+            let href = '';
+            try {{ href = window.parent.location.href; }} catch(_) {{ href = window.location.href; }}
+            const u = new URL(href);
             u.searchParams.set('token', ev.data.token);
             u.searchParams.set('uid', ev.data.uid);
             u.searchParams.set('email', ev.data.email);
@@ -125,8 +126,9 @@ def render_google_login_popup():
             window.removeEventListener('message', onMsg);
             try {{ if (w && !w.closed) w.close(); }} catch (e) {{}}
 
-            // Replace current URL (avoids duplicate history entry)
-            window.location.replace(u.toString());
+            // ✅ Navigate the parent page, not the iframe
+            try {{ window.parent.location.replace(u.toString()); }}
+            catch (e) {{ window.location.replace(u.toString()); }}
           }}
 
           window.addEventListener('message', onMsg);
