@@ -103,13 +103,7 @@ def load_user_inventory() -> pd.DataFrame | None:
         return None
 
 
-# Simple debug counters (after auth processing)
-if "page_loads" not in st.session_state:
-    st.session_state["page_loads"] = 0
-st.session_state["page_loads"] += 1
-st.write(f"DEBUG: Page load count: {st.session_state['page_loads']}")
-st.write(f"DEBUG: Has token in URL: {'token' in st.query_params}")
-st.write(f"DEBUG: Already authenticated: {bool(st.session_state.get('firebase_uid'))}")
+
 
 # =============================
 # UI — Hero
@@ -1510,32 +1504,7 @@ if st.session_state.matches_df is not None:
             file_name="fly_tying_recommender_bundle.zip", mime="application/zip"
         )
 
-    def log_event(name: str, payload: dict):
-        if DB is None:
-            return
-        try:
-            ev = {"name": name, "ts": pd.Timestamp.utcnow().isoformat(), **payload}
-            DB.collection("events").add(ev)
-        except Exception as e:
-            st.warning(f"Analytics not saved: {e}")
 
-    # Note: this runs only in the same execution path as matching; keep it here.
-    if "inv_tokens" in locals():
-        log_event(
-            "run_matching",
-            {
-                "acct": st.session_state.get("account_id", ""),
-                "inv_count": len(inv_tokens),
-                "can_tie": int((matches_df["missing_count"] == 0).sum()),
-                "miss1": int((matches_df["missing_count"] == 1).sum()),
-                "miss2": int((matches_df["missing_count"] == 2).sum()),
-                "size_tol": size_tol,
-                "ignore_labels": ignore_labels,
-                "ignore_color": ignore_color,
-                "prefer_brands": prefer_brands,
-                "src": st.query_params.get("src", ""),
-            },
-        )
 else:
     st.info("Click **Run matching** to see your results.")
 
