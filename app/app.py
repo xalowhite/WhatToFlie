@@ -10,14 +10,13 @@ import hashlib, hmac
 import json
 from urllib.error import URLError
 import requests
-import streamlit.components.v1 as components
 
 # =============================
 # App meta (MUST BE FIRST)
 # =============================
 st.set_page_config(page_title="🪶 Fly Tying Recommender", page_icon="🪶", layout="wide")
 
-APP_BUILD = "auth-v4"
+APP_BUILD = "auth-v5-linkbtn"
 st.caption(f"Build: {APP_BUILD}")
 
 # =============================
@@ -64,46 +63,99 @@ except ImportError:
 except Exception as e:
     st.error(f"❌ Firebase initialization failed: {e}")
 
-# =============================
-# Cloud Sync Functions (For Optional Login)
-# =============================
-def get_user_doc_id() -> str | None:
-    """Returns the user's email to use as a unique document ID in Firestore if logged in."""
-    if st.user:
-        return st.user.email
-    return None
 
-def save_user_inventory(inv_df: pd.DataFrame) -> bool:
-    doc_id = get_user_doc_id()
-    if DB is None or not doc_id:
-        st.error("You must be logged in to save.")
-        return False
+# =============================
+# AUTH BLOCK (redirect to hosted login.html)
+# =============================
+from urllib.parse import urlencode
+
+LOGIN_HOST = "https://whattoflie.web.app/login.html"
+
+def _app_base_url() -> str:
+    """
+    Where login.html should send users back to.
+    Prefer secrets.public_base_url; else default to your Streamlit domain.
+    For local dev, you can set ST_LOCAL_RETURN_TO env (e.g., http://localhost:8501/).
+    """
+    return (
+        (st.secrets.get("public_base_url") or "").strip()
+        or os.getenv("ST_LOCAL_RETURN_TO", "").strip()
+        or "https://whattoflie.streamlit.app/"
+    ).rstrip("/") + "/"
+
+def sign_in_button():
+    """
+    Use a top-level link (not an iframe component) so navigation works in Streamlit.
+    """
+    rt = _app_base_url()
+    url = f"{LOGIN_HOST}?{urlencode({'return_to': rt})}"
+    # Prefer native link_button (same-tab navigation). Fallback to raw HTML anchor.
     try:
-        DB.collection("users").document(doc_id).set(
-            {"inventory": inv_df.to_dict(orient="records")}, merge=True
+        st.link_button("🔑 Sign in", url)
+    except Exception:
+        st.markdown(
+            f'<a href="{url}" target="_self" style="text-decoration:none"><button style="padding:10px 14px;border-radius:8px;border:1px solid #ccc;cursor:pointer">🔑 Sign in</button></a>',
+            unsafe_allow_html=True,
         )
-        return True
-    except Exception as e:
-        st.error(f"Failed to save inventory: {e}")
-        return False
+    with st.expander("If the button didn’t open, copy this URL"):
+        st.code(url)
 
-def load_user_inventory() -> pd.DataFrame | None:
-    doc_id = get_user_doc_id()
-    if DB is None or not doc_id:
-        return None
+def _clean_auth_params():
+    # Remove sensitive params from URL after we store session
     try:
-        doc_ref = DB.collection("users").document(doc_id)
-        doc = doc_ref.get()
-        if doc.exists:
-            inventory_data = doc.to_dict().get("inventory", [])
-            return pd.DataFrame(inventory_data)
-        return None
+        for k in ("token", "uid", "email"):
+            if k in st.query_params:
+                del st.query_params[k]
+    except Exception:
+        pass
+
+def process_auth_from_url():
+    """
+    If ?token=... is present (from login.html), verify it, store uid/email in session,
+    strip query params, and rerun for a clean state.
+    """
+    try:
+        if admin_auth is None:
+            return
+        token = st.query_params.get("token", "")
+        if isinstance(token, list):
+            token = token[0] if token else ""
+        if not token or "firebase_uid" in st.session_state:
+            return
+
+        decoded = admin_auth.verify_id_token(token)  # raises on invalid/expired
+        st.session_state["firebase_uid"] = decoded.get("uid", "")
+        st.session_state["firebase_email"] = decoded.get("email", "")
+
+        # Clean URL (remove token/email/uid) then rerun
+        _clean_auth_params()
+        st.rerun()
+
     except Exception as e:
-        st.error(f"Failed to load inventory: {e}")
-        return None
+        st.error(f"Sign-in failed: {e}")
 
+def sign_out_button():
+    if st.button("Sign out", type="secondary"):
+        st.session_state.pop("firebase_uid", None)
+        st.session_state.pop("firebase_email", None)
+        # Wipe query params entirely
+        try:
+            for k in list(st.query_params.keys()):
+                del st.query_params[k]
+        except Exception:
+            pass
+        st.rerun()
 
+# Process auth immediately so state is clean for the rest of the app
+process_auth_from_url()
 
+# Simple debug counters (after auth processing)
+if "page_loads" not in st.session_state:
+    st.session_state["page_loads"] = 0
+st.session_state["page_loads"] += 1
+st.write(f"DEBUG: Page load count: {st.session_state['page_loads']}")
+st.write(f"DEBUG: Has token in URL: {'token' in st.query_params}")
+st.write(f"DEBUG: Already authenticated: {bool(st.session_state.get('firebase_uid'))}")
 
 # =============================
 # UI — Hero
@@ -118,9 +170,33 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# =============================
+# Authentication UI (single source)
+# =============================
+st.markdown("### 🔐 Authentication")
+if st.session_state.get("firebase_uid"):
+    st.success(f"✅ Signed in as: {st.session_state.get('firebase_email','(no email)')}")
+    with st.expander("Debug (user)"):
+        st.json({
+            "uid": st.session_state.get("firebase_uid"),
+            "email": st.session_state.get("firebase_email"),
+            "db_available": DB is not None
+        })
+    sign_out_button()
+else:
+    st.info("Sign in to sync your inventory across devices (Google or Email/Password).")
+    sign_in_button()
 
+# =============================
+# Legacy hashed ID helper + UID preference
+# =============================
+def doc_id_for(user_id: str) -> str:
+    secret = st.secrets.get("pepper", "local-dev")
+    return hmac.new(secret.encode(), str(user_id).strip().lower().encode(), hashlib.sha256).hexdigest()[:24]
 
-
+def _effective_user_doc_id(user_id_fallback: str) -> str:
+    uid = st.session_state.get("firebase_uid", "").strip()
+    return uid or doc_id_for(user_id_fallback)
 
 # =============================
 # GitHub & local loaders
@@ -689,36 +765,6 @@ def normalize_inventory_entry(material_name: str, brand: str = "", model: str = 
 # Sidebar — onboarding & data sources
 # =============================
 with st.sidebar:
-    # --- NEW: Optional Login Section ---
-    st.header("☁️ Cloud Sync")
-    if DB is None:
-        st.info("Cloud features are unavailable. Please check Firebase configuration.")
-    elif not st.user:
-        st.info("Log in with Google to save your inventory and access it from any device.")
-        if st.button("Log in with Google"):
-            # This will only work if you have completed the OAuth setup
-            st.login(provider="google")
-    else:
-        st.success(f"Logged in as {st.user.name}")
-        if st.button("☁️ Save Inventory to Cloud"):
-            if save_user_inventory(st.session_state.get("inventory_df", pd.DataFrame())):
-                st.toast("Saved your inventory!", icon="✅")
-        
-        if st.button("🔄 Load Inventory from Cloud"):
-            cloud_inv = load_user_inventory()
-            if cloud_inv is not None:
-                for col in ["material", "status", "brand", "model"]:
-                    if col not in cloud_inv.columns: cloud_inv[col] = ""
-                st.session_state.inventory_df = cloud_inv[["material", "status", "brand", "model"]].fillna("")
-                st.toast("Loaded inventory from cloud!", icon="🔄")
-                st.rerun()
-            else:
-                st.warning("No inventory found in the cloud for your account.")
-
-        if st.button("Log out"):
-            st.logout()
-    st.markdown("---")
-    # --- End of New Section ---
     st.info(
         "This tool accepts CSVs with specific headers. Download templates below and follow the examples to avoid formatting issues."
     )
@@ -924,7 +970,7 @@ st.markdown("---")
 st.subheader("Status")
 
 try:
-    _flies_rows = int(flies_df.shape[0]) if "flies_df" in locals() else 0
+    _flies_rows = int(locals().get("flies_df", pd.DataFrame()).shape[0])
     st.write(f"**flies_df**: {_flies_rows} rows loaded")
 except Exception as e:
     st.error(f"flies_df not ready: {e}")
@@ -1061,7 +1107,248 @@ with st.expander("🆕 Create a new recipe from a tutorial"):
             f"Added new recipe '{nr_name}'. It will be included immediately in matching. Use the download button below to save updated flies.csv."
         )
 
+# =============================
+# Cloud sync: Account + prefs (only if DB configured)
+# =============================
+def _current_doc_id():
+    uid = st.session_state.get("firebase_uid", "").strip()
+    if uid:
+        return uid
+    return st.session_state.get("account_id", "").strip().lower()
 
+qp = st.query_params
+if "acct" in qp and not st.session_state.get("account_id"):
+    acct_from_url = qp.get("acct")
+    if isinstance(acct_from_url, list):
+        acct_from_url = acct_from_url[0] if acct_from_url else ""
+    st.session_state["account_id"] = acct_from_url or ""
+    if st.session_state["account_id"]:
+        st.toast(f"Loaded account from URL: {st.session_state['account_id']}", icon="✅")
+
+def set_account_id():
+    acct = st.session_state.get("account_id", "").strip()
+    if acct:
+        st.query_params["acct"] = acct
+    else:
+        if "acct" in st.query_params:
+            del st.query_params["acct"]
+
+st.markdown("### ☁️ Cloud preferences")
+acct_id_prefs = st.text_input(
+    "Account ID for preferences (use the same as Cloud sync above)",
+    key="account_id_prefs",
+    value=st.session_state.get("account_id", ""),
+    placeholder="you@example.com",
+)
+
+def save_user_inventory(inv_df: pd.DataFrame) -> bool:
+    if DB is None or not st.session_state.get("firebase_uid"):
+        st.error("You must be logged in to save.")
+        return False
+    try:
+        doc_id = st.session_state["firebase_uid"]
+        DB.collection("users").document(doc_id).collection("app").document("inventory").set(
+            {"rows": inv_df.to_dict(orient="records")}, merge=True
+        )
+        return True
+    except Exception as e:
+        st.error(f"Failed to save inventory: {e}")
+        return False
+
+def load_user_inventory() -> pd.DataFrame | None:
+    if DB is None or not st.session_state.get("firebase_uid"):
+        return None
+    try:
+        doc_id = st.session_state["firebase_uid"]
+        doc = DB.collection("users").document(doc_id).collection("app").document("inventory").get()
+        return pd.DataFrame(doc.to_dict().get("rows", [])) if doc.exists else None
+    except Exception as e:
+        st.error(f"Failed to load inventory: {e}")
+        return None
+
+def save_user_prefs(user_id: str, prefs: dict) -> bool:
+    if DB is None:
+        return False
+    try:
+        doc_id = _effective_user_doc_id(user_id)
+        DB.collection("users").document(doc_id).collection("app").document("preferences").set(prefs, merge=True)
+        return True
+    except Exception as e:
+        st.error(f"Failed to save preferences: {e}")
+        return False
+
+def load_user_prefs(user_id: str) -> dict | None:
+    if DB is None:
+        return None
+    try:
+        doc_id = _effective_user_doc_id(user_id)
+        doc = DB.collection("users").document(doc_id).collection("app").document("preferences").get()
+        return doc.to_dict() if doc.exists else None
+    except Exception as e:
+        st.error(f"Failed to load preferences: {e}")
+        return None
+
+cP1, cP2 = st.columns(2)
+with cP1:
+    if st.button("Save Preferences to Cloud"):
+        prefs = {
+            "pref_use_subs": bool(st.session_state.get("pref_use_subs", True)),
+            "pref_ignore_labels": bool(st.session_state.get("pref_ignore_labels", True)),
+            "pref_ignore_color": bool(st.session_state.get("pref_ignore_color", True)),
+            "pref_size_tol": int(st.session_state.get("pref_size_tol", 2)),
+            "pref_require_len": bool(st.session_state.get("pref_require_len", False)),
+            "pref_prefer_brands": bool(st.session_state.get("pref_prefer_brands", True)),
+            "aliases_map": locals().get("aliases_map", {}),
+            "subs_map": {k: sorted(list(v)) for k, v in (locals().get("subs_map", {}) or {}).items()},
+            "brand_prefs": locals().get("brand_prefs", {}),
+        }
+        if save_user_prefs(acct_id_prefs, prefs):
+            st.success("Preferences saved to cloud.")
+with cP2:
+    if st.button("Load Preferences from Cloud"):
+        prefs = load_user_prefs(acct_id_prefs)
+        if not prefs:
+            st.warning("No preferences found for this account.")
+        else:
+            for k in [
+                "pref_use_subs",
+                "pref_ignore_labels",
+                "pref_ignore_color",
+                "pref_size_tol",
+                "pref_require_len",
+                "pref_prefer_brands",
+            ]:
+                if k in prefs:
+                    st.session_state[k] = prefs[k]
+            if "aliases_map" in prefs and isinstance(prefs["aliases_map"], dict):
+                aliases_map.update({str(k): str(v) for k, v in prefs["aliases_map"].items()})
+            if "subs_map" in prefs and isinstance(prefs["subs_map"], dict):
+                subs_map.clear()
+                for b, eqs in prefs["subs_map"].items():
+                    subs_map[str(b)] = set(str(e) for e in (eqs or []))
+            if "brand_prefs" in prefs and isinstance(prefs["brand_prefs"], dict):
+                brand_prefs.update(prefs["brand_prefs"])
+            st.success("Preferences loaded from cloud.")
+            st.rerun()
+
+with st.expander("📦 Export / Import preferences (JSON)"):
+    cur_prefs = {
+        "pref_use_subs": bool(st.session_state.get("pref_use_subs", True)),
+        "pref_ignore_labels": bool(st.session_state.get("pref_ignore_labels", True)),
+        "pref_ignore_color": bool(st.session_state.get("pref_ignore_color", True)),
+        "pref_size_tol": int(st.session_state.get("pref_size_tol", 2)),
+        "pref_require_len": bool(st.session_state.get("pref_require_len", False)),
+        "pref_prefer_brands": bool(st.session_state.get("pref_prefer_brands", True)),
+        "aliases_map": locals().get("aliases_map", {}),
+        "subs_map": {k: sorted(list(v)) for k, v in (locals().get("subs_map", {}) or {}).items()},
+        "brand_prefs": locals().get("brand_prefs", {}),
+    }
+    st.download_button(
+        "⬇️ Export preferences.json",
+        data=json.dumps(cur_prefs, indent=2).encode("utf-8"),
+        file_name="preferences.json",
+        mime="application/json",
+        help="Download your current preferences",
+    )
+
+    prefs_json_upload = st.file_uploader("Import preferences.json", type=["json"], key="prefs_json_upload")
+    if prefs_json_upload is not None:
+        try:
+            imported = json.loads(prefs_json_upload.getvalue().decode("utf-8"))
+            for k in [
+                "pref_use_subs",
+                "pref_ignore_labels",
+                "pref_ignore_color",
+                "pref_size_tol",
+                "pref_require_len",
+                "pref_prefer_brands",
+            ]:
+                if k in imported:
+                    st.session_state[k] = imported[k]
+            if "aliases_map" in imported and isinstance(imported["aliases_map"], dict):
+                aliases_map.update({str(k): str(v) for k, v in imported["aliases_map"].items()})
+            if "subs_map" in imported and isinstance(imported["subs_map"], dict):
+                subs_map.clear()
+                for b, eqs in imported["subs_map"].items():
+                    subs_map[str(b)] = set(str(e) for e in (eqs or []))
+            if "brand_prefs" in imported and isinstance(imported["brand_prefs"], dict):
+                brand_prefs.update(imported["brand_prefs"])
+            st.success("Preferences imported from JSON.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Could not import preferences JSON: {e}")
+
+cA, cB = st.columns(2)
+with cA:
+    if st.button("Save to Cloud (inventory editor)"):
+        if st.session_state.inventory_df.empty:
+            st.warning("Inventory editor is empty. Add rows first.")
+        elif save_user_inventory(st.session_state.inventory_df):
+            st.success("Saved your inventory to the cloud.")
+with cB:
+    if st.button("Load from Cloud (replace editor)"):
+        df_cloud = load_user_inventory()
+        if df_cloud is None:
+            st.warning("No cloud inventory found for this account.")
+        else:
+            expected = ["material", "status", "brand", "model"]
+            for col in expected:
+                if col not in df_cloud.columns:
+                    df_cloud[col] = ""
+            df_cloud = df_cloud[expected].fillna("")
+            st.session_state.inventory_df = df_cloud.drop_duplicates().reset_index(drop=True)
+            st.success("Loaded inventory from the cloud.")
+            st.rerun()
+
+# --- Auto-load inventory & prefs once per session (after inputs are visible)
+if DB is not None and st.session_state.get("firebase_uid") and not st.session_state.get("did_auto_load"):
+    try:
+        df_cloud = load_user_inventory()
+        if isinstance(df_cloud, pd.DataFrame) and not df_cloud.empty:
+            expected = ["material", "status", "brand", "model"]
+            for col in expected:
+                if col not in df_cloud.columns:
+                    df_cloud[col] = ""
+            st.session_state.inventory_df = (
+                df_cloud[expected].fillna("").drop_duplicates().reset_index(drop=True)
+            )
+
+        prefs = load_user_prefs(st.session_state["firebase_uid"])
+        if prefs:
+            for k in [
+                "pref_use_subs",
+                "pref_ignore_labels",
+                "pref_ignore_color",
+                "pref_size_tol",
+                "pref_require_len",
+                "pref_prefer_brands",
+            ]:
+                if k in prefs:
+                    st.session_state[k] = prefs[k]
+            if "aliases_map" in prefs and isinstance(prefs["aliases_map"], dict):
+                aliases_map.update({str(k): str(v) for k, v in prefs["aliases_map"].items()})
+            if "subs_map" in prefs and isinstance(prefs["subs_map"], dict):
+                subs_map.clear()
+                for b, eqs in prefs["subs_map"].items():
+                    subs_map[str(b)] = set(str(e) for e in (eqs or []))
+            if "brand_prefs" in prefs and isinstance(prefs["brand_prefs"], dict):
+                brand_prefs.update(prefs["brand_prefs"])
+
+        st.session_state["did_auto_load"] = True
+        st.rerun()
+    except Exception as e:
+        st.warning(f"Auto-load failed: {e}")
+
+# =============================
+# Inventory Source for Matching (RESTORED)
+# =============================
+st.header("Inventory Source for Matching")
+inv_source = st.radio(
+    "Choose which inventory to use when matching:",
+    ["Step 3 upload/paste/sample", "Inventory Editor (session)", "Merge both"],
+    index=0,
+    help="The editor lets you manage inventory inline. Merge = union of both sources (excluding items with status OUT).",
+)
 
 # =============================
 # Run matching
@@ -1083,17 +1370,21 @@ if run_now:
     size_tol = locals().get("size_tol", 2)
     require_len = locals().get("require_len", False)
 
-    # Combine inventory from Step 3 (file/paste) and the in-session editor
-    inv_editor_df = st.session_state.get("inventory_df", pd.DataFrame())
-    inv_tokens_editor = set()
-    if not inv_editor_df.empty and "material" in inv_editor_df.columns:
-        present_mask = inv_editor_df.get("status", pd.Series(dtype=str)).fillna("").str.upper() != "OUT"
-        inv_tokens_editor = set(inv_editor_df.loc[present_mask, "material"].dropna().map(normalize).tolist())
+    # Build inventory tokens
+    inv_tokens_step3 = locals().get("inv_tokens_from_step3", set())
+    inv_editor_df = st.session_state.get("inventory_df", pd.DataFrame(columns=["material", "status", "brand", "model"]))
+    if not inv_editor_df.empty:
+        present_mask_editor = inv_editor_df.get("status", "").astype(str).str.upper().ne("OUT")
+        inv_tokens_editor = set(inv_editor_df.loc[present_mask_editor, "material"].dropna().map(normalize).tolist())
+    else:
+        inv_tokens_editor = set()
 
-    inv_tokens = inv_tokens_from_step3.union(inv_tokens_editor)
-
-    if not inv_tokens:
-        st.warning("Your combined inventory is empty. Add items via file, paste, or the editor.")
+    if inv_source == "Step 3 upload/paste/sample":
+        inv_tokens = inv_tokens_step3
+    elif inv_source == "Inventory Editor (session)":
+        inv_tokens = inv_tokens_editor
+    else:
+        inv_tokens = inv_tokens_step3.union(inv_tokens_editor)
 
     # Compute matches
     matches_df = compute_matches(
@@ -1165,8 +1456,8 @@ if st.session_state.matches_df is not None:
     c2.metric("🟡 Missing 1", int((matches_df["missing_count"] == 1).sum()))
     c3.metric("🟠 Missing 2", int((matches_df["missing_count"] == 2).sum()))
 
-    types = sorted(flies_df["type"].dropna().unique().tolist())
-    species_all = sorted(set(itertools.chain.from_iterable(flies_df["species"].tolist())))
+    types = sorted(locals()["flies_df"]["type"].dropna().unique().tolist())
+    species_all = sorted(set(itertools.chain.from_iterable(locals()["flies_df"]["species"].tolist())))
     col1, col2, col3 = st.columns(3)
     with col1:
         type_filter = st.multiselect("Filter by type", types, default=types)
@@ -1371,7 +1662,7 @@ if st.session_state.matches_df is not None:
                         known.update([normalize(e) for e in eqs])
                 return {normalize(strip_label(k)) for k in known if k}
 
-            known_tokens = derive_known_material_tokens(flies_df, aliases_map, subs_map)
+            known_tokens = derive_known_material_tokens(locals()["flies_df"], aliases_map, subs_map)
 
             suspicious = []
             for t in sorted(inv_all_tokens):
@@ -1427,7 +1718,7 @@ if st.session_state.matches_df is not None:
         if simulate_btn:
             hypothetical_inv = set(current_inv_tokens).union(set(pick)).union(set(extra_tokens))
             matches_sim = compute_matches(
-                flies_df=flies_df,
+                flies_df=locals()["flies_df"],
                 inv_tokens=hypothetical_inv,
                 aliases_map=aliases_map,
                 subs_map=subs_map,
@@ -1447,7 +1738,7 @@ if st.session_state.matches_df is not None:
             cA.metric("✅ Can tie now (what-if)", int((matches_sim["missing_count"] == 0).sum()))
             cB.metric("🟡 Missing 1 (what-if)", int((matches_sim["missing_count"] == 1).sum()))
             cC.metric("🟠 Missing 2 (what-if)", int((matches_sim["missing_count"] == 2).sum()))
-            unlocked = matches_sim[(matches_sim["missing_count"] == 0) & (matches_df["missing_count"] > 0)]
+            unlocked = matches_sim[(matches_sim["missing_count"] == 0) & (st.session_state.matches_df["missing_count"] > 0)]
             st.markdown("**Newly unlocked patterns (vs. current):**")
             st.dataframe(
                 unlocked[["fly_name", "type", "species"]].sort_values(["type", "fly_name"]),
@@ -1504,7 +1795,32 @@ if st.session_state.matches_df is not None:
             file_name="fly_tying_recommender_bundle.zip", mime="application/zip"
         )
 
+    def log_event(name: str, payload: dict):
+        if DB is None:
+            return
+        try:
+            ev = {"name": name, "ts": pd.Timestamp.utcnow().isoformat(), **payload}
+            DB.collection("events").add(ev)
+        except Exception as e:
+            st.warning(f"Analytics not saved: {e}")
 
+    # Note: this runs only in the same execution path as matching; keep it here.
+    if "inv_tokens" in locals():
+        log_event(
+            "run_matching",
+            {
+                "acct": st.session_state.get("account_id", ""),
+                "inventory_source": inv_source,
+                "inv_count": len(inv_tokens),
+                "can_tie": int((matches_df["missing_count"] == 0).sum()),
+                "miss1": int((matches_df["missing_count"] == 1).sum()),
+                "miss2": int((matches_df["missing_count"] == 2).sum()),
+                "size_tol": size_tol,
+                "ignore_labels": ignore_labels,
+                "ignore_color": ignore_color,
+                "prefer_brands": prefer_brands,
+                "src": st.query_params.get("src", ""),
+            },
+        )
 else:
     st.info("Click **Run matching** to see your results.")
-
